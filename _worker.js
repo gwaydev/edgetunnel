@@ -6,6 +6,265 @@ const Pages静态页面 = 'https://edt-pages.github.io';
 const WS早期数据最大字节 = 8 * 1024, WS早期数据最大头长度 = Math.ceil(WS早期数据最大字节 * 4 / 3) + 4;
 const 上行合包目标字节 = 16 * 1024, 上行队列最大字节 = 16 * 1024 * 1024, 上行队列最大条目 = 4096;
 const 下行Grain包字节 = 32 * 1024, 下行Grain尾部阈值 = 512, 下行Grain静默毫秒 = 0;
+const XBOARD_UUID_V4正则 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const XBOARD默认缓存毫秒 = 30 * 1000, XBOARD默认最大陈旧毫秒 = 10 * 60 * 1000;
+let Xboard白名单缓存 = null;
+let Xboard流量缓存 = new Map();
+let Xboard流量推送中 = null, Xboard上次推送时间 = 0, Xboard下次允许推送时间 = 0, Xboard连续推送失败 = 0;
+
+function 规范化XboardUUID(value) {
+	const uuid = String(value || '').trim().toLowerCase();
+	return XBOARD_UUID_V4正则.test(uuid) ? uuid : null;
+}
+
+function 解析XboardUUID列表(value) {
+	let values = value;
+	if (typeof value === 'string') {
+		const text = value.trim();
+		if (!text) return [];
+		try { values = JSON.parse(text) }
+		catch (_) { values = text.split(/[\s,]+/) }
+	}
+	if (!Array.isArray(values)) return [];
+	return [...new Set(values.map(规范化XboardUUID).filter(Boolean))].sort();
+}
+
+function 解析Xboard用户映射(value, allowedUUIDs = null) {
+	let source = value;
+	if (typeof source === 'string') {
+		try { source = JSON.parse(source || '{}') }
+		catch (_) { return {} }
+	}
+	if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
+	const result = {};
+	for (const [rawUUID, rawUserID] of Object.entries(source)) {
+		const uuid = 规范化XboardUUID(rawUUID);
+		const userID = Number(rawUserID);
+		if (!uuid || !Number.isSafeInteger(userID) || userID <= 0) continue;
+		if (allowedUUIDs && !allowedUUIDs.has(uuid)) continue;
+		result[uuid] = userID;
+	}
+	return result;
+}
+
+function 解析Xboard快照(text, now = Date.now()) {
+	const source = typeof text === 'string' ? JSON.parse(text) : text;
+	if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Invalid Xboard snapshot');
+	if (source.version !== 1) throw new Error('Invalid Xboard snapshot version');
+	if (typeof source.generatedAt !== 'string' || !source.generatedAt.trim() || !Number.isFinite(Date.parse(source.generatedAt))) {
+		throw new Error('Invalid Xboard snapshot generatedAt');
+	}
+	if (source.serverId !== null && (!Number.isSafeInteger(source.serverId) || source.serverId <= 0)) {
+		throw new Error('Invalid Xboard snapshot serverId');
+	}
+	if (!Array.isArray(source.uuids)) throw new Error('Invalid Xboard snapshot UUID list');
+	if (!source.userMap || typeof source.userMap !== 'object' || Array.isArray(source.userMap)) {
+		throw new Error('Invalid Xboard snapshot userMap');
+	}
+
+	const normalizedUUIDs = [];
+	const uuidSet = new Set();
+	for (const rawUUID of source.uuids) {
+		const uuid = 规范化XboardUUID(rawUUID);
+		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot');
+		if (uuidSet.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot');
+		uuidSet.add(uuid);
+		normalizedUUIDs.push(uuid);
+	}
+
+	const normalizedUserMap = new Map();
+	for (const [rawUUID, rawUserID] of Object.entries(source.userMap)) {
+		const uuid = 规范化XboardUUID(rawUUID);
+		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot userMap');
+		if (normalizedUserMap.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot userMap');
+		if (!Number.isSafeInteger(rawUserID) || rawUserID <= 0) throw new Error('Invalid user ID in Xboard snapshot');
+		normalizedUserMap.set(uuid, rawUserID);
+	}
+	if (uuidSet.size !== normalizedUserMap.size || [...uuidSet].some(uuid => !normalizedUserMap.has(uuid))) {
+		throw new Error('Xboard snapshot uuids and userMap must contain the same UUID set');
+	}
+
+	const uuidList = [...uuidSet].sort();
+	return {
+		mode: 'xboard',
+		version: 1,
+		generatedAt: source.generatedAt,
+		serverId: source.serverId,
+		uuids: new Set(uuidList),
+		userMap: Object.fromEntries(uuidList.map(uuid => [uuid, normalizedUserMap.get(uuid)])),
+		loadedAt: now,
+		stale: false,
+		failClosed: false,
+	};
+}
+
+function 复制Xboard访问上下文(source, overrides = {}) {
+	return {
+		...source,
+		uuids: source.uuids instanceof Set ? new Set(source.uuids) : source.uuids,
+		userMap: { ...(source.userMap || {}) },
+		...overrides,
+	};
+}
+
+function 创建Xboard失败关闭上下文(now, error, stale = false) {
+	return {
+		mode: 'xboard', version: '', generatedAt: '', serverId: null, uuids: new Set(), userMap: {}, loadedAt: now,
+		stale, failClosed: true, error: error?.message || String(error),
+	};
+}
+
+async function 读取Xboard白名单(env = {}, now = Date.now(), force = false) {
+	const kv = env.XBOARD_KV;
+	if (!kv || typeof kv.get !== 'function') {
+		return { mode: 'personal', version: '', generatedAt: '', serverId: null, uuids: null, userMap: {}, loadedAt: now, stale: false, failClosed: false };
+	}
+
+	const cacheMs = Math.max(0, Number(env.XBOARD_CACHE_TTL_SECONDS ?? 30) * 1000 || XBOARD默认缓存毫秒);
+	const maxStaleMs = Math.max(cacheMs, Number(env.XBOARD_MAX_STALE_SECONDS ?? 600) * 1000 || XBOARD默认最大陈旧毫秒);
+	if (!force && Xboard白名单缓存 && now - Xboard白名单缓存.loadedAt < cacheMs) {
+		return 复制Xboard访问上下文(Xboard白名单缓存);
+	}
+
+	let snapshotText;
+	try {
+		snapshotText = await kv.get('xboard:snapshot');
+	} catch (error) {
+		if (Xboard白名单缓存 && now - Xboard白名单缓存.loadedAt <= maxStaleMs) {
+			return 复制Xboard访问上下文(Xboard白名单缓存, { stale: true, error: error?.message || String(error) });
+		}
+		return 创建Xboard失败关闭上下文(now, error, true);
+	}
+
+	try {
+		if (snapshotText === null || snapshotText === undefined || (typeof snapshotText === 'string' && snapshotText.trim() === '')) {
+			throw new Error('Missing xboard:snapshot');
+		}
+		const result = 解析Xboard快照(snapshotText, now);
+		Xboard白名单缓存 = result;
+		return 复制Xboard访问上下文(result);
+	} catch (error) {
+		Xboard白名单缓存 = null;
+		return 创建Xboard失败关闭上下文(now, error, false);
+	}
+}
+
+function 解析VLESSUUID(data, offset = 1) {
+	const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+	if (!bytes || bytes.byteLength < offset + 16) return null;
+	const hex = Array.from(bytes.subarray(offset, offset + 16), value => value.toString(16).padStart(2, '0')).join('');
+	return 规范化XboardUUID(`${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`);
+}
+
+function 校验VLESSUUID(data, fallbackUUID, accessContext = null) {
+	const uuid = 解析VLESSUUID(data);
+	if (!uuid) return null;
+	if (!accessContext || accessContext.mode === 'personal') return uuid === 规范化XboardUUID(fallbackUUID) ? uuid : null;
+	return accessContext.uuids instanceof Set && accessContext.uuids.has(uuid) ? uuid : null;
+}
+
+function 累加Xboard流量(uuid, uploadBytes = 0, downloadBytes = 0) {
+	const key = 规范化XboardUUID(uuid);
+	if (!key) return;
+	const upload = Number.isFinite(Number(uploadBytes)) ? Math.max(0, Math.trunc(Number(uploadBytes))) : 0;
+	const download = Number.isFinite(Number(downloadBytes)) ? Math.max(0, Math.trunc(Number(downloadBytes))) : 0;
+	if (!upload && !download) return;
+	const current = Xboard流量缓存.get(key) || [0, 0];
+	current[0] += upload;
+	current[1] += download;
+	Xboard流量缓存.set(key, current);
+}
+
+function 获取Xboard流量快照() {
+	return Object.fromEntries([...Xboard流量缓存.entries()].map(([uuid, value]) => [uuid, [...value]]));
+}
+
+function 合并Xboard流量批次(batch) {
+	for (const [uuid, value] of batch.entries()) 累加Xboard流量(uuid, value[0], value[1]);
+}
+
+async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(), fetchImpl = fetch, force = false) {
+	if (Xboard流量推送中) {
+		if (!force) return Xboard流量推送中;
+		await Xboard流量推送中;
+	}
+	const apiBase = String(env.XBOARD_API_BASE || '').replace(/\/$/, '');
+	const nodeId = String(env.XBOARD_NODE_ID || '').trim();
+	const token = String(env.XBOARD_SERVER_TOKEN || '').trim();
+	if (!apiBase || !nodeId || !token || Xboard流量缓存.size === 0) return false;
+	const intervalMs = Math.max(0, Number(env.XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS ?? 60) * 1000 || 0);
+	if (!force && (now < Xboard下次允许推送时间 || (Xboard上次推送时间 && now - Xboard上次推送时间 < intervalMs))) return false;
+
+	const userMap = 解析Xboard用户映射(userMapValue);
+	const batch = new Map();
+	const body = {};
+	for (const [uuid, value] of Xboard流量缓存.entries()) {
+		const userID = userMap[uuid];
+		if (!userID) continue;
+		batch.set(uuid, [...value]);
+		Xboard流量缓存.delete(uuid);
+		const key = String(userID);
+		const aggregate = body[key] || [0, 0];
+		aggregate[0] += value[0];
+		aggregate[1] += value[1];
+		body[key] = aggregate;
+	}
+	if (batch.size === 0) return false;
+
+	Xboard流量推送中 = (async () => {
+		try {
+			const url = `${apiBase}/api/v1/server/UniProxy/push?node_id=${encodeURIComponent(nodeId)}&node_type=vless&token=${encodeURIComponent(token)}`;
+			const response = await fetchImpl(url, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify(body),
+			});
+			if (!response || !response.ok) throw new Error(`Xboard traffic push failed: HTTP ${response?.status ?? 'unknown'}`);
+			Xboard上次推送时间 = now;
+			Xboard连续推送失败 = 0;
+			Xboard下次允许推送时间 = 0;
+			return true;
+		} catch (error) {
+			合并Xboard流量批次(batch);
+			Xboard连续推送失败++;
+			Xboard下次允许推送时间 = now + Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(Xboard连续推送失败 - 1, 8)));
+			throw error;
+		} finally {
+			Xboard流量推送中 = null;
+		}
+	})();
+	return Xboard流量推送中;
+}
+
+function 安排Xboard流量推送(env, ctx, userMap, force = false) {
+	const task = 推送Xboard流量(env, userMap, Date.now(), fetch, force)
+		.catch(error => log(`[Xboard流量] 推送失败: ${error?.message || error}`));
+	if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
+	return task;
+}
+
+function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx) {
+	const uuid = 规范化XboardUUID(uuidValue);
+	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
+	const 记录 = (upload, download) => {
+		累加Xboard流量(uuid, upload, download);
+		安排Xboard流量推送(env, ctx, accessContext.userMap || {});
+	};
+	return {
+		上传(bytes) { 记录(bytes, 0) },
+		下载(bytes) { 记录(0, bytes) },
+		推送() { return 安排Xboard流量推送(env, ctx, accessContext.userMap || {}, true) },
+	};
+}
+
+function 重置Xboard状态() {
+	Xboard白名单缓存 = null;
+	Xboard流量缓存 = new Map();
+	Xboard流量推送中 = null;
+	Xboard上次推送时间 = 0;
+	Xboard下次允许推送时间 = 0;
+	Xboard连续推送失败 = 0;
+}
 let TCP并发拨号数 = 2, 反代并发拨号数 = 1, 预加载竞速拨号 = false;
 ///////////////////////////////////////////////////////查杀特征码///////////////////////////////////////////////
 const 特征码字典 = [
@@ -67,17 +326,20 @@ export default {
 		} else if (管理员密码 && upgradeHeader === 'websocket') {// WebSocket代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
-			return await 处理WS请求(request, userID, url, 反代上下文);
+			const accessContext = await 读取Xboard白名单(env);
+			return await 处理WS请求(request, userID, url, 反代上下文, accessContext, env, ctx);
 		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && request.method === 'POST') {// gRPC/XHTTP代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			const referer = request.headers.get('Referer') || '';
 			const 命中XHTTP特征 = referer.includes('x_padding', 14) || referer.includes('x_padding=');
 			if (!命中XHTTP特征 && contentType.startsWith('application/grpc')) {
 				log(`[gRPC] 命中请求: ${url.pathname}${url.search}`);
-				return await 处理gRPC请求(request, userID, 反代上下文);
+				const accessContext = await 读取Xboard白名单(env);
+				return await 处理gRPC请求(request, userID, 反代上下文, accessContext, env, ctx);
 			}
 			log(`[XHTTP] 命中请求: ${url.pathname}${url.search}`);
-			return await 处理XHTTP请求(request, userID, 反代上下文);
+			const accessContext = await 读取Xboard白名单(env);
+			return await 处理XHTTP请求(request, userID, 反代上下文, accessContext, env, ctx);
 		} else {
 			if (url.protocol === 'http:') return Response.redirect(url.href.replace(`http://${url.hostname}`, `https://${url.hostname}`), 301);
 			if (!管理员密码) return fetch(Pages静态页面 + '/noADMIN').then(r => { const headers = new Headers(r.headers); headers.set('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate'); headers.set('Pragma', 'no-cache'); headers.set('Expires', '0'); return new Response(r.body, { status: 404, statusText: r.statusText, headers }) });
@@ -528,10 +790,10 @@ export default {
 	}
 };
 ///////////////////////////////////////////////////////////////////////XHTTP传输数据///////////////////////////////////////////////
-async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}) {
+async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, accessContext = null, env = {}, ctx = null) {
 	if (!request.body) return new Response('Bad Request', { status: 400 });
 	const reader = request.body.getReader();
-	const 首包 = await 读取XHTTP首包(reader, yourUUID);
+	const 首包 = await 读取XHTTP首包(reader, yourUUID, accessContext);
 	if (!首包) {
 		try { reader.releaseLock() } catch (e) { }
 		return new Response('Invalid request', { status: 400 });
@@ -544,6 +806,9 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}) {
 		try { reader.releaseLock() } catch (e) { }
 		return new Response('UDP is not supported', { status: 400 });
 	}
+	const Xboard流量记录器 = !首包.isUDP && 首包.协议 === 'vless'
+		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx)
+		: null;
 
 	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
 	let 当前写入Socket = null;
@@ -616,6 +881,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}) {
 					try { remoteConnWrapper.socket?.close() } catch (e) { }
 					closeSocketQuietly(xhttpBridge);
 				},
+				写入成功: (bytes) => Xboard流量记录器?.上传(bytes),
 				名称: 'XHTTP上行'
 			});
 
@@ -637,7 +903,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}) {
 						udpRespHeader = null;
 					}
 				} else {
-					await forwardataTCP(首包.hostname, 首包.port, 首包.rawData, xhttpBridge, 首包.respHeader, remoteConnWrapper, yourUUID, request, 反代上下文, 首包.协议 === 'trojan', 首包.原始数据);
+					await forwardataTCP(首包.hostname, 首包.port, 首包.rawData, xhttpBridge, 首包.respHeader, remoteConnWrapper, yourUUID, request, 反代上下文, 首包.协议 === 'trojan', 首包.原始数据, Xboard流量记录器 ? (bytes) => Xboard流量记录器.上传(bytes) : null, Xboard流量记录器 ? (bytes) => Xboard流量记录器.下载(bytes) : null);
 				}
 
 				while (true) {
@@ -670,6 +936,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}) {
 				释放远端写入器();
 				if (!保持木马UDP反代下行) try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
 				try { reader.releaseLock() } catch (e) { }
+				Xboard流量记录器?.推送();
 			}
 		},
 		cancel() {
@@ -689,13 +956,14 @@ function 有效数据长度(data) {
 	return 0;
 }
 
-async function 读取XHTTP首包(reader, token) {
+async function 读取XHTTP首包(reader, token, accessContext = null) {
 	const decoder = VLESS文本解码器;
 
 	const 尝试解析魏烈思首包 = (data) => {
 		const length = data.byteLength;
 		if (length < 18) return { 状态: 'need_more' };
-		if (!UUID字节匹配(data, 1, token)) return { 状态: 'invalid' };
+		const uuid = 校验VLESSUUID(data, token, accessContext);
+		if (!uuid) return { 状态: 'invalid' };
 
 		const optLen = data[17];
 		const cmdIndex = 18 + optLen;
@@ -740,6 +1008,7 @@ async function 读取XHTTP首包(reader, token) {
 			状态: 'ok',
 			结果: {
 				协议: 'vl' + 'ess',
+				uuid,
 				hostname,
 				port,
 				isUDP: cmd === 2,
@@ -850,7 +1119,7 @@ async function 读取XHTTP首包(reader, token) {
 	return null;
 }
 ///////////////////////////////////////////////////////////////////////gRPC传输数据///////////////////////////////////////////////
-async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
+async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessContext = null, env = {}, ctx = null) {
 	if (!request.body) return new Response('Bad Request', { status: 400 });
 	const reader = request.body.getReader();
 	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
@@ -860,6 +1129,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	let 当前写入Socket = null;
 	let 远端写入器 = null;
 	let GRPC上行写入队列 = null;
+	let Xboard流量记录器 = null;
 	//log('[gRPC] 开始处理双向流');
 	const grpcHeaders = new Headers({
 		'Content-Type': 'application/grpc',
@@ -994,6 +1264,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 					await remoteConnWrapper.retryConnect();
 				},
 				关闭连接,
+				写入成功: (bytes) => Xboard流量记录器?.上传(bytes),
 				名称: 'gRPC上行'
 			});
 
@@ -1064,9 +1335,10 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 								}
 							} else {
 								判断是否是木马 = false;
-								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID);
+								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID, accessContext);
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
-								const { port, hostname, version, isUDP, rawClientData } = 解析结果;
+								const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
+								Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx) : null;
 								log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 								if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 								if (isUDP) {
@@ -1080,7 +1352,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 									if (判断是否是木马) await 转发木马UDP数据(rawData, grpcBridge, 木马UDP上下文, request);
 									else await forwardataudp(rawData, grpcBridge, null, request);
 								}
-								else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
+								else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, Xboard流量记录器 ? (bytes) => Xboard流量记录器.上传(bytes) : null, Xboard流量记录器 ? (bytes) => Xboard流量记录器.下载(bytes) : null);
 							}
 						}
 					}
@@ -1091,6 +1363,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 				转发失败 = true;
 				log(`[gRPC转发] 处理失败: ${err?.message || err}`);
 			} finally {
+				Xboard流量记录器?.推送();
 				const 保持木马UDP反代下行 = !转发失败 && isDnsQuery && 判断是否是木马 && 木马UDP上下文.反代地址 && 木马UDP上下文.反代Socket;
 				if (保持木马UDP反代下行) {
 					上行写入队列.清空();
@@ -1110,9 +1383,9 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	}), { status: 200, headers: grpcHeaders });
 }
 
-function 是有效WS早期数据(bytes, token) {
+function 是有效WS早期数据(bytes, token, accessContext = null) {
 	if (!bytes?.byteLength) return false;
-	if (bytes.byteLength >= 18 && UUID字节匹配(bytes, 1, token)) return true;
+	if (bytes.byteLength >= 18 && 校验VLESSUUID(bytes, token, accessContext)) return true;
 	if (bytes.byteLength < 58 || bytes[56] !== 0x0d || bytes[57] !== 0x0a) return false;
 
 	const trojanPassword = sha224(token);
@@ -1122,7 +1395,7 @@ function 是有效WS早期数据(bytes, token) {
 	return true;
 }
 
-function 解码WS早期数据(header, token) {
+function 解码WS早期数据(header, token, accessContext = null) {
 	if (!header) return null;
 	if (header.length > WS早期数据最大头长度) throw new Error('early data is too large');
 
@@ -1148,11 +1421,11 @@ function 解码WS早期数据(header, token) {
 	}
 
 	if (bytes.byteLength > WS早期数据最大字节) throw new Error('early data is too large');
-	return 是有效WS早期数据(bytes, token) ? bytes : null;
+	return 是有效WS早期数据(bytes, token, accessContext) ? bytes : null;
 }
 
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
-async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
+async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, accessContext = null, env = {}, ctx = null) {
 	const WS套接字对 = new WebSocketPair();
 	const [clientSock, serverSock] = Object.values(WS套接字对);
 	try { (/** @type {any} */ (serverSock)).accept({ allowHalfOpen: true }) }
@@ -1169,6 +1442,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 	let WS显式传输停止接收 = false, WS显式传输失败 = false, WS显式传输收尾已入队 = false;
 	let WS显式队列字节 = 0, WS显式队列条目 = 0;
 	let 判断协议类型 = null, 当前写入Socket = null, 远端写入器 = null;
+	let Xboard流量记录器 = null;
 	let ss上下文 = null, ss初始化任务 = null;
 
 	const 释放远端写入器 = () => {
@@ -1199,6 +1473,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 			try { remoteConnWrapper.socket?.close() } catch (e) { }
 			closeSocketQuietly(serverSock);
 		},
+		写入成功: (bytes) => Xboard流量记录器?.上传(bytes),
 		名称: 'WS上行'
 	});
 
@@ -1491,9 +1766,10 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 			判断是否是木马 = false;
 			当前块字节 = 当前块字节 || 数据转Uint8Array(chunk);
 			const bytes = 当前块字节;
-			const 解析结果 = 解析魏烈思请求(bytes, yourUUID);
+			const 解析结果 = 解析魏烈思请求(bytes, yourUUID, accessContext);
 			if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
-			const { port, hostname, version, isUDP, rawClientData } = 解析结果;
+			const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
+			Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx) : null;
 			if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 			if (isUDP) {
 				if (port === 53) isDnsQuery = true;
@@ -1505,7 +1781,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 				if (判断是否是木马) return 转发木马UDP数据(rawData, serverSock, 木马UDP上下文, request);
 				return forwardataudp(rawData, serverSock, respHeader, request);
 			}
-			await forwardataTCP(hostname, port, rawData, serverSock, respHeader, remoteConnWrapper, yourUUID, request, 反代上下文);
+			await forwardataTCP(hostname, port, rawData, serverSock, respHeader, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, Xboard流量记录器 ? (bytes) => Xboard流量记录器.上传(bytes) : null, Xboard流量记录器 ? (bytes) => Xboard流量记录器.下载(bytes) : null);
 		}
 	};
 
@@ -1525,6 +1801,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		释放远端写入器();
 		try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
 		closeSocketQuietly(serverSock);
+		Xboard流量记录器?.推送();
 	};
 
 	const 追加WS显式传输任务 = (任务) => {
@@ -1569,6 +1846,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 	serverSock.addEventListener('close', () => {
 		closeSocketQuietly(serverSock);
 		收尾WS显式传输();
+		Xboard流量记录器?.推送();
 	});
 	serverSock.addEventListener('error', (err) => {
 		处理WS显式传输错误(err);
@@ -1577,7 +1855,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 	// SS 模式下禁用 sec-websocket-protocol early-data，避免把子协议值（如 "binary"）误当作 base64 数据注入首包导致 AEAD 解密失败。
 	if (!SS模式禁用EarlyData && earlyDataHeader) {
 		try {
-			const bytes = 解码WS早期数据(earlyDataHeader, yourUUID);
+			const bytes = 解码WS早期数据(earlyDataHeader, yourUUID, accessContext);
 			if (bytes?.byteLength) 入队WS显式传输(bytes.buffer);
 		} catch (error) {
 			处理WS显式传输错误(error);
@@ -1762,12 +2040,13 @@ function UUID字节匹配(data, offset, uuid) {
 	return true;
 }
 
-function 解析魏烈思请求(chunk, token) {
+function 解析魏烈思请求(chunk, token, accessContext = null) {
 	const data = 数据转Uint8Array(chunk);
 	const length = data.byteLength;
 	if (length < 24) return { hasError: true, message: 'Invalid data' };
 	const version = data[0];
-	if (!UUID字节匹配(data, 1, token)) return { hasError: true, message: 'Invalid uuid' };
+	const uuid = 校验VLESSUUID(data, token, accessContext);
+	if (!uuid) return { hasError: true, message: 'Invalid uuid' };
 
 	const optLen = data[17];
 	const cmdIndex = 18 + optLen;
@@ -1809,7 +2088,7 @@ function 解析魏烈思请求(chunk, token) {
 	}
 	if (!hostname) return { hasError: true, message: `Invalid address: ${addressType}` };
 	const rawIndex = addrValIdx + addrLen;
-	return { hasError: false, addressType, port, hostname, isUDP, rawClientData: data.subarray(rawIndex), version };
+	return { hasError: false, addressType, port, hostname, isUDP, rawClientData: data.subarray(rawIndex), version, uuid };
 }
 
 const SS支持加密配置 = {
@@ -1967,7 +2246,7 @@ async function SSAEAD解密(cryptoKey, nonceCounter, ciphertext) {
 	return new Uint8Array(pt);
 }
 
-async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID, request = null, 反代上下文 = {}, 允许木马反代 = false, 木马反代首包数据 = null) {
+async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID, request = null, 反代上下文 = {}, 允许木马反代 = false, 木马反代首包数据 = null, onUpload = null, onDownload = null) {
 	const ctx反代IP = 反代上下文.反代IP || '';
 	const ctx代理类型 = 反代上下文.代理类型 !== undefined ? 反代上下文.代理类型 : null;
 	const ctx代理全局 = 反代上下文.代理全局 !== undefined ? 反代上下文.代理全局 : false;
@@ -2174,10 +2453,13 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 				const 所有反代数组 = await 解析地址端口(ctx反代IP, host, yourUUID);
 				newSocket = await connectProxyIP(`${特征码字典[0]}.tp1.${特征码字典[2]}.xyz`, 1, 本次首包数据, 所有反代数组, ctx反代兜底);
 			}
-			if (本次发送首包) 已通过代理发送首包 = true;
+			if (本次发送首包) {
+				已通过代理发送首包 = true;
+				if (typeof onUpload === 'function') onUpload(有效数据长度(rawData));
+			}
 			remoteConnWrapper.socket = newSocket;
 			newSocket.closed.catch(() => { }).finally(() => closeSocketQuietly(ws));
-			connectStreams(newSocket, ws, respHeader, null);
+			connectStreams(newSocket, ws, respHeader, null, onDownload);
 		})();
 
 		remoteConnWrapper.connectingPromise = 当前连接任务;
@@ -2203,11 +2485,12 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 		try {
 			log(`[TCP转发] 尝试直连到: ${host}:${portNum}`);
 			const initialSocket = await connectDirect(host, portNum, rawData, true);
+			if (typeof onUpload === 'function' && 有效数据长度(rawData) > 0) onUpload(有效数据长度(rawData));
 			remoteConnWrapper.socket = initialSocket;
 			connectStreams(initialSocket, ws, respHeader, async () => {
 				if (remoteConnWrapper.socket !== initialSocket) return;
 				await connecttoPry();
-			});
+			}, onDownload);
 		} catch (err) {
 			log(`[TCP转发] 直连 ${host}:${portNum} 失败: ${err.message}`);
 			if (err instanceof Error && err.name === '预加载解析为空') {
@@ -2277,7 +2560,7 @@ async function WebSocket发送并等待(webSocket, payload) {
 	if (sendResult && typeof sendResult.then === 'function') await sendResult;
 }
 
-function 创建上行写入队列({ 获取写入器, 释放写入器, 重试连接, 关闭连接, 名称 = '上行队列' }) {
+function 创建上行写入队列({ 获取写入器, 释放写入器, 重试连接, 关闭连接, 写入成功 = null, 名称 = '上行队列' }) {
 	let chunks = [];
 	let head = 0;
 	let queuedBytes = 0;
@@ -2395,6 +2678,7 @@ function 创建上行写入队列({ 获取写入器, 释放写入器, 重试连�
 						if (!writer) throw err;
 						await writer.write(item.chunk);
 					}
+					if (typeof 写入成功 === 'function') 写入成功(item.chunk.byteLength);
 					settleCompletions(completions);
 				} catch (err) {
 					settleCompletions(completions, err);
@@ -2566,7 +2850,7 @@ function 创建下行Grain发送器(webSocket, headerData = null) {
 	};
 }
 
-async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
+async function connectStreams(remoteSocket, webSocket, headerData, retryFunc, onDownload = null) {
 	let header = headerData, hasData = false, reader, useBYOB = false;
 	const BYOB单次读取上限 = 64 * 1024;
 	const 下行发送器 = 创建下行Grain发送器(webSocket, header);
@@ -2582,6 +2866,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 				if (done) break;
 				if (!value || value.byteLength === 0) continue;
 				hasData = true;
+				if (typeof onDownload === 'function') onDownload(value.byteLength);
 				await 下行发送器.发送(value);
 			}
 		} else {
@@ -2591,6 +2876,7 @@ async function connectStreams(remoteSocket, webSocket, headerData, retryFunc) {
 				if (done) break;
 				if (!value || value.byteLength === 0) continue;
 				hasData = true;
+				if (typeof onDownload === 'function') onDownload(value.byteLength);
 				if (value.byteLength >= 下行Grain包字节) {
 					await 下行发送器.flush();
 					await 下行发送器.直接发送(value);
@@ -6111,3 +6397,18 @@ async function html1101(host, 访问IP) {
 </body>
 </html>`;
 }
+
+export {
+	解析Xboard快照,
+	读取Xboard白名单,
+	重置Xboard状态,
+	解析VLESSUUID,
+	校验VLESSUUID,
+	累加Xboard流量,
+	推送Xboard流量,
+	获取Xboard流量快照,
+	解析魏烈思请求,
+	是有效WS早期数据,
+	读取XHTTP首包,
+	创建Xboard流量记录器,
+};
