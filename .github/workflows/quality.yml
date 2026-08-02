@@ -13,17 +13,27 @@ jobs:
   quality:
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Check out edgetunnel
         uses: actions/checkout@v4
+        with:
+          path: edgetunnel
+
+      - name: Check out Xboard contract fixture
+        uses: actions/checkout@v4
+        with:
+          repository: gwaydev/Xboard
+          path: Xboard
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          cache-dependency-path: edgetunnel/package-lock.json
 
       - name: Reject tracked secrets and runtime artifacts
         shell: bash
+        working-directory: edgetunnel
         run: |
           violations="$({
             git ls-files | awk '
@@ -42,12 +52,16 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+        working-directory: edgetunnel
 
       - name: Check worker syntax
         run: npm run syntax
+        working-directory: edgetunnel
 
       - name: Run worker tests
         run: npm test
+        working-directory: edgetunnel
 
       - name: Run credential-free deploy dry-run
         run: npm run deploy:dry
+        working-directory: edgetunnel

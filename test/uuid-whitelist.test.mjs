@@ -376,3 +376,169 @@ test('推送进行中产生的新流量保留在活动 Map，并可在下一批�
   assert.deepEqual(JSON.parse(requests[1].init.body), { 7: [5, 7] });
   assert.deepEqual(获取Xboard流量快照(), {});
 });
+function trafficEnv(overrides = {}) {
+  return {
+    XBOARD_API_BASE: 'https://xboard.example',
+    XBOARD_NODE_ID: '1',
+    XBOARD_SERVER_TOKEN: 'token',
+    XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS: '0',
+    ...overrides,
+  };
+}
+
+test('默认 900 秒 TTL：孤儿流量在边界前保留且不 fetch，在边界丢弃', async () => {
+  let fetchCalls = 0;
+  const noFetch = async () => {
+    fetchCalls++;
+    throw new Error('orphan traffic must not fetch');
+  };
+
+  累加Xboard流量(UUID_A, 100, 200, 0);
+  assert.equal(await 推送Xboard流量(trafficEnv(), {}, 899_999, noFetch, true), false);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [100, 200] });
+
+  assert.equal(await 推送Xboard流量(trafficEnv(), {}, 900_000, noFetch, true), false);
+  assert.deepEqual(获取Xboard流量快照(), {});
+  assert.equal(fetchCalls, 0);
+});
+
+test('孤儿流量超过默认 TTL 时丢弃且不 fetch', async () => {
+  let fetchCalls = 0;
+  累加Xboard流量(UUID_A, 100, 200, 0);
+
+  assert.equal(await 推送Xboard流量(trafficEnv(), {}, 900_001, async () => {
+    fetchCalls++;
+    throw new Error('orphan traffic must not fetch');
+  }, true), false);
+
+  assert.deepEqual(获取Xboard流量快照(), {});
+  assert.equal(fetchCalls, 0);
+});
+
+test('有限有效 TTL 最小 clamp 为 60 秒', async () => {
+  const env = trafficEnv({ XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '1' });
+  const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
+
+  累加Xboard流量(UUID_A, 1, 2, 0);
+  await 推送Xboard流量(env, {}, 59_999, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [1, 2] });
+
+  await 推送Xboard流量(env, {}, 60_000, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), {});
+});
+
+test('缺失或无效 TTL 安全回退到默认 900 秒', async () => {
+  for (const invalidValue of [undefined, '', 'not-a-number', '0', '-5', 'Infinity']) {
+    重置Xboard状态();
+    const env = trafficEnv();
+    if (invalidValue !== undefined) env.XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS = invalidValue;
+    const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
+
+    累加Xboard流量(UUID_A, 1, 2, 0);
+    await 推送Xboard流量(env, {}, 899_999, noFetch, true);
+    assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [1, 2] }, `value ${String(invalidValue)} must retain before 900 seconds`);
+
+    await 推送Xboard流量(env, {}, 900_000, noFetch, true);
+    assert.deepEqual(获取Xboard流量快照(), {}, `value ${String(invalidValue)} must expire at 900 seconds`);
+  }
+});
+
+test('当前 userMap 中的有效流量仍按用户聚合发送，成功后缓存清空', async () => {
+  const requests = [];
+  累加Xboard流量(UUID_A, 100, 200, 0);
+  累加Xboard流量(UUID_B, 10, 20, 10);
+
+  assert.equal(await 推送Xboard流量(trafficEnv(), { [UUID_A]: 42, [UUID_B]: 42 }, 1_000, async (url, init) => {
+    requests.push({ url, init });
+    return new Response('{}', { status: 200 });
+  }, true), true);
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(JSON.parse(requests[0].init.body), { 42: [110, 220] });
+  assert.deepEqual(获取Xboard流量快照(), {});
+
+  累加Xboard流量(UUID_A, 1, 2, 0);
+  await 推送Xboard流量(trafficEnv(), {}, 900_000, async () => {
+    throw new Error('orphan traffic must not fetch');
+  }, true);
+  assert.deepEqual(获取Xboard流量快照(), {}, 'successful batches must delete stale timestamp metadata');
+});
+
+test('合法 batch 非 2xx 后合并回缓存并从失败时刻刷新 TTL', async () => {
+  累加Xboard流量(UUID_A, 10, 20, 0);
+
+  await assert.rejects(推送Xboard流量(trafficEnv(), { [UUID_A]: 42 }, 900_000, async () => (
+    new Response('synthetic failure', { status: 503 })
+  ), true), /503/);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+
+  const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
+  await 推送Xboard流量(trafficEnv(), {}, 1_799_999, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+
+  await 推送Xboard流量(trafficEnv(), {}, 1_800_000, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), {});
+});
+
+test('合法 batch 抛错后合并回缓存', async () => {
+  累加Xboard流量(UUID_A, 10, 20, 0);
+
+  await assert.rejects(推送Xboard流量(trafficEnv(), { [UUID_A]: 42 }, 1_000, async () => {
+    throw new Error('synthetic fetch failure');
+  }, true), /synthetic fetch failure/);
+
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+});
+
+test('失败回并不丢并发新增流量，且不会倒退更晚的 timestamp', async () => {
+  let releaseFetch;
+  const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
+  累加Xboard流量(UUID_A, 10, 20, 0);
+
+  const push = 推送Xboard流量(trafficEnv(), { [UUID_A]: 42 }, 900_000, async () => {
+    await fetchGate;
+    return new Response('synthetic failure', { status: 503 });
+  }, true);
+  await Promise.resolve();
+  累加Xboard流量(UUID_A, 5, 7, 900_100);
+  releaseFetch();
+
+  await assert.rejects(push, /503/);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [15, 27] });
+
+  const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
+  await 推送Xboard流量(trafficEnv(), {}, 1_800_050, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [15, 27] });
+
+  await 推送Xboard流量(trafficEnv(), {}, 1_800_100, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), {});
+});
+
+test('reset 清空流量状态，公开快照只暴露 synthetic aggregate', async () => {
+  累加Xboard流量(UUID_A, 10, 20, 123_456);
+  const snapshotValue = 获取Xboard流量快照();
+  assert.deepEqual(snapshotValue, { [UUID_A]: [10, 20] });
+  assert.deepEqual(Object.keys(snapshotValue), [UUID_A]);
+  assert.equal(JSON.stringify(snapshotValue).includes('timestamp'), false);
+  assert.equal(JSON.stringify(snapshotValue).includes('123456'), false);
+
+  重置Xboard状态();
+  assert.deepEqual(获取Xboard流量快照(), {});
+
+  累加Xboard流量(UUID_A, 1, 2, 0);
+  await 推送Xboard流量(trafficEnv(), {}, 900_000, async () => {
+    throw new Error('orphan traffic must not fetch');
+  }, true);
+  assert.deepEqual(获取Xboard流量快照(), {}, 'reset must delete stale timestamp metadata');
+});
+
+test('孤儿过期清理同时删除 timestamp 元数据', async () => {
+  const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
+  累加Xboard流量(UUID_A, 10, 20, 1_000_000);
+  await 推送Xboard流量(trafficEnv(), {}, 1_900_000, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), {});
+
+  累加Xboard流量(UUID_A, 1, 2, 0);
+  await 推送Xboard流量(trafficEnv(), {}, 900_000, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), {}, 'expired orphan cleanup must delete stale timestamp metadata');
+});
