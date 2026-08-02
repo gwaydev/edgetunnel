@@ -1,0 +1,53 @@
+name: Quality
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Reject tracked secrets and runtime artifacts
+        shell: bash
+        run: |
+          violations="$({
+            git ls-files | awk '
+              /(^|\/)\.env$/ ||
+              /(^|\/)\.wrangler(\/|$)/ ||
+              /(^|\/)tmp-wrangler-dry-run(\/|$)/ {
+                print
+              }
+            '
+          })"
+          if [ -n "$violations" ]; then
+            printf '%s\n' 'Forbidden tracked paths detected:'
+            printf '%s\n' "$violations"
+            exit 1
+          fi
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check worker syntax
+        run: npm run syntax
+
+      - name: Run worker tests
+        run: npm test
+
+      - name: Run credential-free deploy dry-run
+        run: npm run deploy:dry

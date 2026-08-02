@@ -1,0 +1,10 @@
+{
+  "scripts": {
+    "syntax": "node --check _worker.js",
+    "test": "node --test test/*.test.mjs",
+    "deploy:dry": "wrangler deploy --dry-run --outdir tmp-wrangler-dry-run"
+  },
+  "devDependencies": {
+    "wrangler": "4.61.0"
+  }
+}
