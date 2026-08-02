@@ -443,6 +443,62 @@ test('缺失或无效 TTL 安全回退到默认 900 秒', async () => {
   }
 });
 
+test('缺 credentials 时仍清理到期 orphan，mapped traffic 保留且不 fetch', async () => {
+  let fetchCalls = 0;
+  累加Xboard流量(UUID_A, 10, 20, 0);
+  累加Xboard流量(UUID_B, 30, 40, 0);
+
+  assert.equal(await 推送Xboard流量({
+    XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60',
+  }, { [UUID_B]: 42 }, 60_000, async () => {
+    fetchCalls++;
+    throw new Error('credential gate must not fetch');
+  }), false);
+
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_B]: [30, 40] });
+  assert.equal(fetchCalls, 0);
+});
+
+test('interval gate 时仍清理到期 orphan，mapped traffic 保留且不额外 fetch', async () => {
+  const env = trafficEnv({
+    XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS: '3600',
+    XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60',
+  });
+  let gatedFetchCalls = 0;
+
+  累加Xboard流量(UUID_A, 1, 2, 0);
+  await 推送Xboard流量(env, { [UUID_A]: 42 }, 1_000, async () => new Response('{}', { status: 200 }));
+
+  累加Xboard流量(UUID_A, 10, 20, 0);
+  累加Xboard流量(UUID_B, 30, 40, 0);
+  assert.equal(await 推送Xboard流量(env, { [UUID_B]: 42 }, 60_000, async () => {
+    gatedFetchCalls++;
+    throw new Error('interval gate must not fetch');
+  }), false);
+
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_B]: [30, 40] });
+  assert.equal(gatedFetchCalls, 0);
+});
+
+test('backoff gate 时仍清理到期 orphan，mapped traffic 保留且不额外 fetch', async () => {
+  const env = trafficEnv({ XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60' });
+  累加Xboard流量(UUID_A, 10, 20, 60_000);
+
+  await assert.rejects(推送Xboard流量(env, { [UUID_A]: 42 }, 60_000, async () => (
+    new Response('synthetic failure', { status: 503 })
+  ), false, () => 60_000), /503/);
+
+  累加Xboard流量(UUID_B, 30, 40, 0);
+  let gatedFetchCalls = 0;
+  assert.equal(await 推送Xboard流量(env, { [UUID_A]: 42 }, 60_500, async () => {
+    gatedFetchCalls++;
+    throw new Error('backoff gate must not fetch');
+  }), false);
+
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+  assert.equal(gatedFetchCalls, 0);
+});
+
 test('当前 userMap 中的有效流量仍按用户聚合发送，成功后缓存清空', async () => {
   const requests = [];
   累加Xboard流量(UUID_A, 100, 200, 0);
@@ -464,19 +520,30 @@ test('当前 userMap 中的有效流量仍按用户聚合发送，成功后缓�
   assert.deepEqual(获取Xboard流量快照(), {}, 'successful batches must delete stale timestamp metadata');
 });
 
-test('合法 batch 非 2xx 后合并回缓存并从失败时刻刷新 TTL', async () => {
+test('长 in-flight 的合法 batch 非 2xx 后从真正失败时刻刷新 TTL', async () => {
+  const env = trafficEnv({ XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60' });
+  let completionNow = 10_000;
+  let releaseFetch;
+  const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
   累加Xboard流量(UUID_A, 10, 20, 0);
 
-  await assert.rejects(推送Xboard流量(trafficEnv(), { [UUID_A]: 42 }, 900_000, async () => (
-    new Response('synthetic failure', { status: 503 })
-  ), true), /503/);
-  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+  const push = 推送Xboard流量(env, { [UUID_A]: 42 }, 10_000, async () => {
+    await fetchGate;
+    return new Response('synthetic failure', { status: 503 });
+  }, true, () => completionNow);
+  await Promise.resolve();
+  completionNow = 120_000;
+  releaseFetch();
 
+  await assert.rejects(push, /503/);
   const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
-  await 推送Xboard流量(trafficEnv(), {}, 1_799_999, noFetch, true);
+  await 推送Xboard流量(env, {}, 120_000, noFetch, true);
   assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
 
-  await 推送Xboard流量(trafficEnv(), {}, 1_800_000, noFetch, true);
+  await 推送Xboard流量(env, {}, 179_999, noFetch, true);
+  assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [10, 20] });
+
+  await 推送Xboard流量(env, {}, 180_000, noFetch, true);
   assert.deepEqual(获取Xboard流量快照(), {});
 });
 
@@ -491,26 +558,29 @@ test('合法 batch 抛错后合并回缓存', async () => {
 });
 
 test('失败回并不丢并发新增流量，且不会倒退更晚的 timestamp', async () => {
+  const env = trafficEnv({ XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60' });
+  let completionNow = 10_000;
   let releaseFetch;
   const fetchGate = new Promise((resolve) => { releaseFetch = resolve; });
   累加Xboard流量(UUID_A, 10, 20, 0);
 
-  const push = 推送Xboard流量(trafficEnv(), { [UUID_A]: 42 }, 900_000, async () => {
+  const push = 推送Xboard流量(env, { [UUID_A]: 42 }, 10_000, async () => {
     await fetchGate;
     return new Response('synthetic failure', { status: 503 });
-  }, true);
+  }, true, () => completionNow);
   await Promise.resolve();
-  累加Xboard流量(UUID_A, 5, 7, 900_100);
+  completionNow = 120_000;
+  累加Xboard流量(UUID_A, 5, 7, 130_000);
   releaseFetch();
 
   await assert.rejects(push, /503/);
   assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [15, 27] });
 
   const noFetch = async () => { throw new Error('orphan traffic must not fetch'); };
-  await 推送Xboard流量(trafficEnv(), {}, 1_800_050, noFetch, true);
+  await 推送Xboard流量(env, {}, 189_999, noFetch, true);
   assert.deepEqual(获取Xboard流量快照(), { [UUID_A]: [15, 27] });
 
-  await 推送Xboard流量(trafficEnv(), {}, 1_800_100, noFetch, true);
+  await 推送Xboard流量(env, {}, 190_000, noFetch, true);
   assert.deepEqual(获取Xboard流量快照(), {});
 });
 

@@ -186,17 +186,12 @@ function 合并Xboard流量批次(batch, now = Date.now()) {
 	for (const [uuid, value] of batch.entries()) 累加Xboard流量(uuid, value[0], value[1], now);
 }
 
-async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(), fetchImpl = fetch, force = false) {
+async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(), fetchImpl = fetch, force = false, completionClock = Date.now) {
 	if (Xboard流量推送中) {
 		if (!force) return Xboard流量推送中;
 		await Xboard流量推送中;
 	}
-	const apiBase = String(env.XBOARD_API_BASE || '').replace(/\/$/, '');
-	const nodeId = String(env.XBOARD_NODE_ID || '').trim();
-	const token = String(env.XBOARD_SERVER_TOKEN || '').trim();
-	if (!apiBase || !nodeId || !token || Xboard流量缓存.size === 0) return false;
-	const intervalMs = Math.max(0, Number(env.XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS ?? 60) * 1000 || 0);
-	if (!force && (now < Xboard下次允许推送时间 || (Xboard上次推送时间 && now - Xboard上次推送时间 < intervalMs))) return false;
+	if (Xboard流量缓存.size === 0) return false;
 
 	const userMap = 解析Xboard用户映射(userMapValue);
 	const configuredOrphanTtl = Number(env.XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS);
@@ -204,19 +199,29 @@ async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(),
 		? Math.max(60, configuredOrphanTtl)
 		: 900;
 	const orphanTtlMs = orphanTtlSeconds * 1000;
+	for (const uuid of Xboard流量缓存.keys()) {
+		if (userMap[uuid]) continue;
+		const lastUpdatedAt = Xboard流量最后更新时间.get(uuid) ?? now;
+		if (now - lastUpdatedAt >= orphanTtlMs) {
+			Xboard流量缓存.delete(uuid);
+			Xboard流量最后更新时间.delete(uuid);
+			log(`[Xboard流量] 丢弃已撤权 UUID 的过期未推送流量: ${uuid.slice(0, 8)}…`);
+		}
+	}
+	if (Xboard流量缓存.size === 0) return false;
+
+	const apiBase = String(env.XBOARD_API_BASE || '').replace(/\/$/, '');
+	const nodeId = String(env.XBOARD_NODE_ID || '').trim();
+	const token = String(env.XBOARD_SERVER_TOKEN || '').trim();
+	if (!apiBase || !nodeId || !token) return false;
+	const intervalMs = Math.max(0, Number(env.XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS ?? 60) * 1000 || 0);
+	if (!force && (now < Xboard下次允许推送时间 || (Xboard上次推送时间 && now - Xboard上次推送时间 < intervalMs))) return false;
+
 	const batch = new Map();
 	const body = {};
 	for (const [uuid, value] of Xboard流量缓存.entries()) {
 		const userID = userMap[uuid];
-		if (!userID) {
-			const lastUpdatedAt = Xboard流量最后更新时间.get(uuid) ?? now;
-			if (now - lastUpdatedAt >= orphanTtlMs) {
-				Xboard流量缓存.delete(uuid);
-				Xboard流量最后更新时间.delete(uuid);
-				log(`[Xboard流量] 丢弃已撤权 UUID 的过期未推送流量: ${uuid.slice(0, 8)}…`);
-			}
-			continue;
-		}
+		if (!userID) continue;
 		batch.set(uuid, [...value]);
 		Xboard流量缓存.delete(uuid);
 		Xboard流量最后更新时间.delete(uuid);
@@ -242,7 +247,9 @@ async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(),
 			Xboard下次允许推送时间 = 0;
 			return true;
 		} catch (error) {
-			合并Xboard流量批次(batch, now);
+			const completedAtValue = Number(completionClock());
+			const completedAt = Number.isFinite(completedAtValue) ? completedAtValue : Date.now();
+			合并Xboard流量批次(batch, completedAt);
 			Xboard连续推送失败++;
 			Xboard下次允许推送时间 = now + Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(Xboard连续推送失败 - 1, 8)));
 			throw error;
