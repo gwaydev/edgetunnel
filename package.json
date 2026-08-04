@@ -1,7 +1,9 @@
 {
+  "private": true,
+  "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "syntax": "node --check _worker.js && node --check dist/worker.js",
+    "syntax": "npm run build && node --check _worker.js && node --check dist/worker.js",
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",
     "deploy:dry": "npm run build && wrangler deploy --dry-run --outdir tmp-wrangler-dry-run"
