@@ -54,6 +54,10 @@ jobs:
         run: npm ci
         working-directory: edgetunnel
 
+      - name: Build worker bundle
+        run: npm run build
+        working-directory: edgetunnel
+
       - name: Check worker syntax
         run: npm run syntax
         working-directory: edgetunnel
