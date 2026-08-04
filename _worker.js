@@ -1,3 +1,11 @@
+import {
+	normalizeXboardUuid as 规范化XboardUUID,
+	parseXboardSnapshot as 解析Xboard快照,
+	readXboardAccessContext as 读取Xboard白名单,
+	resetXboardSnapshotStateForTest,
+} from './src/xboard-snapshot.js';
+import { createTrafficAccumulator } from './src/xboard-traffic.js';
+
 const Version = '2026-07-11 19:02:35';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
@@ -6,150 +14,6 @@ const Pages静态页面 = 'https://edt-pages.github.io';
 const WS早期数据最大字节 = 8 * 1024, WS早期数据最大头长度 = Math.ceil(WS早期数据最大字节 * 4 / 3) + 4;
 const 上行合包目标字节 = 16 * 1024, 上行队列最大字节 = 16 * 1024 * 1024, 上行队列最大条目 = 4096;
 const 下行Grain包字节 = 32 * 1024, 下行Grain尾部阈值 = 512, 下行Grain静默毫秒 = 0;
-const XBOARD_UUID_V4正则 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const XBOARD默认缓存毫秒 = 30 * 1000, XBOARD默认最大陈旧毫秒 = 10 * 60 * 1000;
-let Xboard白名单缓存 = null;
-let Xboard流量缓存 = new Map();
-let Xboard流量最后更新时间 = new Map();
-let Xboard流量推送中 = null, Xboard上次推送时间 = 0, Xboard下次允许推送时间 = 0, Xboard连续推送失败 = 0;
-
-function 规范化XboardUUID(value) {
-	const uuid = String(value || '').trim().toLowerCase();
-	return XBOARD_UUID_V4正则.test(uuid) ? uuid : null;
-}
-
-function 解析XboardUUID列表(value) {
-	let values = value;
-	if (typeof value === 'string') {
-		const text = value.trim();
-		if (!text) return [];
-		try { values = JSON.parse(text) }
-		catch (_) { values = text.split(/[\s,]+/) }
-	}
-	if (!Array.isArray(values)) return [];
-	return [...new Set(values.map(规范化XboardUUID).filter(Boolean))].sort();
-}
-
-function 解析Xboard用户映射(value, allowedUUIDs = null) {
-	let source = value;
-	if (typeof source === 'string') {
-		try { source = JSON.parse(source || '{}') }
-		catch (_) { return {} }
-	}
-	if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
-	const result = {};
-	for (const [rawUUID, rawUserID] of Object.entries(source)) {
-		const uuid = 规范化XboardUUID(rawUUID);
-		const userID = Number(rawUserID);
-		if (!uuid || !Number.isSafeInteger(userID) || userID <= 0) continue;
-		if (allowedUUIDs && !allowedUUIDs.has(uuid)) continue;
-		result[uuid] = userID;
-	}
-	return result;
-}
-
-function 解析Xboard快照(text, now = Date.now()) {
-	const source = typeof text === 'string' ? JSON.parse(text) : text;
-	if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Invalid Xboard snapshot');
-	if (source.version !== 1) throw new Error('Invalid Xboard snapshot version');
-	if (typeof source.generatedAt !== 'string' || !source.generatedAt.trim() || !Number.isFinite(Date.parse(source.generatedAt))) {
-		throw new Error('Invalid Xboard snapshot generatedAt');
-	}
-	if (source.serverId !== null && (!Number.isSafeInteger(source.serverId) || source.serverId <= 0)) {
-		throw new Error('Invalid Xboard snapshot serverId');
-	}
-	if (!Array.isArray(source.uuids)) throw new Error('Invalid Xboard snapshot UUID list');
-	if (!source.userMap || typeof source.userMap !== 'object' || Array.isArray(source.userMap)) {
-		throw new Error('Invalid Xboard snapshot userMap');
-	}
-
-	const normalizedUUIDs = [];
-	const uuidSet = new Set();
-	for (const rawUUID of source.uuids) {
-		const uuid = 规范化XboardUUID(rawUUID);
-		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot');
-		if (uuidSet.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot');
-		uuidSet.add(uuid);
-		normalizedUUIDs.push(uuid);
-	}
-
-	const normalizedUserMap = new Map();
-	for (const [rawUUID, rawUserID] of Object.entries(source.userMap)) {
-		const uuid = 规范化XboardUUID(rawUUID);
-		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot userMap');
-		if (normalizedUserMap.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot userMap');
-		if (!Number.isSafeInteger(rawUserID) || rawUserID <= 0) throw new Error('Invalid user ID in Xboard snapshot');
-		normalizedUserMap.set(uuid, rawUserID);
-	}
-	if (uuidSet.size !== normalizedUserMap.size || [...uuidSet].some(uuid => !normalizedUserMap.has(uuid))) {
-		throw new Error('Xboard snapshot uuids and userMap must contain the same UUID set');
-	}
-
-	const uuidList = [...uuidSet].sort();
-	return {
-		mode: 'xboard',
-		version: 1,
-		generatedAt: source.generatedAt,
-		serverId: source.serverId,
-		uuids: new Set(uuidList),
-		userMap: Object.fromEntries(uuidList.map(uuid => [uuid, normalizedUserMap.get(uuid)])),
-		loadedAt: now,
-		stale: false,
-		failClosed: false,
-	};
-}
-
-function 复制Xboard访问上下文(source, overrides = {}) {
-	return {
-		...source,
-		uuids: source.uuids instanceof Set ? new Set(source.uuids) : source.uuids,
-		userMap: { ...(source.userMap || {}) },
-		...overrides,
-	};
-}
-
-function 创建Xboard失败关闭上下文(now, error, stale = false) {
-	return {
-		mode: 'xboard', version: '', generatedAt: '', serverId: null, uuids: new Set(), userMap: {}, loadedAt: now,
-		stale, failClosed: true, error: error?.message || String(error),
-	};
-}
-
-async function 读取Xboard白名单(env = {}, now = Date.now(), force = false) {
-	const kv = env.XBOARD_KV;
-	if (!kv || typeof kv.get !== 'function') {
-		return { mode: 'personal', version: '', generatedAt: '', serverId: null, uuids: null, userMap: {}, loadedAt: now, stale: false, failClosed: false };
-	}
-
-	const cacheMs = Math.max(0, Number(env.XBOARD_CACHE_TTL_SECONDS ?? 30) * 1000 || XBOARD默认缓存毫秒);
-	const maxStaleMs = Math.max(cacheMs, Number(env.XBOARD_MAX_STALE_SECONDS ?? 600) * 1000 || XBOARD默认最大陈旧毫秒);
-	if (!force && Xboard白名单缓存 && now - Xboard白名单缓存.loadedAt < cacheMs) {
-		return 复制Xboard访问上下文(Xboard白名单缓存);
-	}
-
-	let snapshotText;
-	try {
-		snapshotText = await kv.get('xboard:snapshot');
-	} catch (error) {
-		if (Xboard白名单缓存 && now - Xboard白名单缓存.loadedAt <= maxStaleMs) {
-			return 复制Xboard访问上下文(Xboard白名单缓存, { stale: true, error: error?.message || String(error) });
-		}
-		return 创建Xboard失败关闭上下文(now, error, true);
-	}
-
-	try {
-		if (snapshotText === null || snapshotText === undefined || (typeof snapshotText === 'string' && snapshotText.trim() === '')) {
-			throw new Error('Missing xboard:snapshot');
-		}
-		const result = 解析Xboard快照(snapshotText, now);
-		Xboard白名单缓存 = result;
-		return 复制Xboard访问上下文(result);
-	} catch (error) {
-		Xboard白名单缓存 = null;
-		return 创建Xboard失败关闭上下文(now, error, false);
-	}
-}
-
 function 解析VLESSUUID(data, offset = 1) {
 	const bytes = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
 	if (!bytes || bytes.byteLength < offset + 16) return null;
@@ -164,131 +28,34 @@ function 校验VLESSUUID(data, fallbackUUID, accessContext = null) {
 	return accessContext.uuids instanceof Set && accessContext.uuids.has(uuid) ? uuid : null;
 }
 
-function 累加Xboard流量(uuid, uploadBytes = 0, downloadBytes = 0, now = Date.now()) {
-	const key = 规范化XboardUUID(uuid);
-	if (!key) return;
-	const upload = Number.isFinite(Number(uploadBytes)) ? Math.max(0, Math.trunc(Number(uploadBytes))) : 0;
-	const download = Number.isFinite(Number(downloadBytes)) ? Math.max(0, Math.trunc(Number(downloadBytes))) : 0;
-	if (!upload && !download) return;
-	const current = Xboard流量缓存.get(key) || [0, 0];
-	current[0] += upload;
-	current[1] += download;
-	Xboard流量缓存.set(key, current);
-	const updatedAt = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-	Xboard流量最后更新时间.set(key, Math.max(Xboard流量最后更新时间.get(key) ?? updatedAt, updatedAt));
-}
+const Xboard流量累加器 = createTrafficAccumulator({
+	fetchImpl: (...args) => fetch(...args),
+	log,
+});
 
-function 获取Xboard流量快照() {
-	return Object.fromEntries([...Xboard流量缓存.entries()].map(([uuid, value]) => [uuid, [...value]]));
-}
-
-function 合并Xboard流量批次(batch, now = Date.now()) {
-	for (const [uuid, value] of batch.entries()) 累加Xboard流量(uuid, value[0], value[1], now);
-}
-
-async function 推送Xboard流量(env = {}, userMapValue = {}, now = Date.now(), fetchImpl = fetch, force = false, completionClock = Date.now) {
-	if (Xboard流量推送中) {
-		if (!force) return Xboard流量推送中;
-		await Xboard流量推送中;
-	}
-	if (Xboard流量缓存.size === 0) return false;
-
-	const userMap = 解析Xboard用户映射(userMapValue);
-	const configuredOrphanTtl = Number(env.XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS);
-	const orphanTtlSeconds = Number.isFinite(configuredOrphanTtl) && configuredOrphanTtl > 0
-		? Math.max(60, configuredOrphanTtl)
-		: 900;
-	const orphanTtlMs = orphanTtlSeconds * 1000;
-	for (const uuid of Xboard流量缓存.keys()) {
-		if (userMap[uuid]) continue;
-		const lastUpdatedAt = Xboard流量最后更新时间.get(uuid) ?? now;
-		if (now - lastUpdatedAt >= orphanTtlMs) {
-			Xboard流量缓存.delete(uuid);
-			Xboard流量最后更新时间.delete(uuid);
-			log(`[Xboard流量] 丢弃已撤权 UUID 的过期未推送流量: ${uuid.slice(0, 8)}…`);
-		}
-	}
-	if (Xboard流量缓存.size === 0) return false;
-
-	const apiBase = String(env.XBOARD_API_BASE || '').replace(/\/$/, '');
-	const nodeId = String(env.XBOARD_NODE_ID || '').trim();
-	const token = String(env.XBOARD_SERVER_TOKEN || '').trim();
-	if (!apiBase || !nodeId || !token) return false;
-	const intervalMs = Math.max(0, Number(env.XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS ?? 60) * 1000 || 0);
-	if (!force && (now < Xboard下次允许推送时间 || (Xboard上次推送时间 && now - Xboard上次推送时间 < intervalMs))) return false;
-
-	const batch = new Map();
-	const body = {};
-	for (const [uuid, value] of Xboard流量缓存.entries()) {
-		const userID = userMap[uuid];
-		if (!userID) continue;
-		batch.set(uuid, [...value]);
-		Xboard流量缓存.delete(uuid);
-		Xboard流量最后更新时间.delete(uuid);
-		const key = String(userID);
-		const aggregate = body[key] || [0, 0];
-		aggregate[0] += value[0];
-		aggregate[1] += value[1];
-		body[key] = aggregate;
-	}
-	if (batch.size === 0) return false;
-
-	Xboard流量推送中 = (async () => {
-		try {
-			const url = `${apiBase}/api/v1/server/UniProxy/push?node_id=${encodeURIComponent(nodeId)}&node_type=vless&token=${encodeURIComponent(token)}`;
-			const response = await fetchImpl(url, {
-				method: 'POST',
-				headers: { 'Content-Type': 'application/json' },
-				body: JSON.stringify(body),
-			});
-			if (!response || !response.ok) throw new Error(`Xboard traffic push failed: HTTP ${response?.status ?? 'unknown'}`);
-			Xboard上次推送时间 = now;
-			Xboard连续推送失败 = 0;
-			Xboard下次允许推送时间 = 0;
-			return true;
-		} catch (error) {
-			const completedAtValue = Number(completionClock());
-			const completedAt = Number.isFinite(completedAtValue) ? completedAtValue : Date.now();
-			合并Xboard流量批次(batch, completedAt);
-			Xboard连续推送失败++;
-			Xboard下次允许推送时间 = now + Math.min(5 * 60 * 1000, 1000 * (2 ** Math.min(Xboard连续推送失败 - 1, 8)));
-			throw error;
-		} finally {
-			Xboard流量推送中 = null;
-		}
-	})();
-	return Xboard流量推送中;
-}
-
-function 安排Xboard流量推送(env, ctx, userMap, force = false) {
-	const task = 推送Xboard流量(env, userMap, Date.now(), fetch, force)
+function 安排Xboard流量推送(env, ctx, userMap, force = false, accumulator = Xboard流量累加器) {
+	const task = (force ? accumulator.flush(env, userMap, Date.now()) : accumulator.push(env, userMap, Date.now()))
 		.catch(error => log(`[Xboard流量] 推送失败: ${error?.message || error}`));
 	if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
 	return task;
 }
 
-function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx) {
+function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard流量累加器) {
 	const uuid = 规范化XboardUUID(uuidValue);
 	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
 	const 记录 = (upload, download) => {
-		累加Xboard流量(uuid, upload, download);
-		安排Xboard流量推送(env, ctx, accessContext.userMap || {});
+		accumulator.add(uuid, upload, download);
+		安排Xboard流量推送(env, ctx, accessContext.userMap || {}, false, accumulator);
 	};
 	return {
 		上传(bytes) { 记录(bytes, 0) },
 		下载(bytes) { 记录(0, bytes) },
-		推送() { return 安排Xboard流量推送(env, ctx, accessContext.userMap || {}, true) },
+		推送() { return 安排Xboard流量推送(env, ctx, accessContext.userMap || {}, true, accumulator) },
 	};
 }
 
 function 重置Xboard状态() {
-	Xboard白名单缓存 = null;
-	Xboard流量缓存 = new Map();
-	Xboard流量最后更新时间 = new Map();
-	Xboard流量推送中 = null;
-	Xboard上次推送时间 = 0;
-	Xboard下次允许推送时间 = 0;
-	Xboard连续推送失败 = 0;
+	resetXboardSnapshotStateForTest();
 }
 let TCP并发拨号数 = 2, 反代并发拨号数 = 1, 预加载竞速拨号 = false;
 ///////////////////////////////////////////////////////查杀特征码///////////////////////////////////////////////
@@ -6429,9 +6196,6 @@ export {
 	重置Xboard状态,
 	解析VLESSUUID,
 	校验VLESSUUID,
-	累加Xboard流量,
-	推送Xboard流量,
-	获取Xboard流量快照,
 	解析魏烈思请求,
 	是有效WS早期数据,
 	读取XHTTP首包,
