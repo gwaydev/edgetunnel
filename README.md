@@ -1,224 +1,313 @@
-# 🚀 edgetunnel 2.1
-![后台页面](./img.png)
+# Edgetunnel
 
-[![Stars](https://img.shields.io/github/stars/cmliu/edgetunnel?style=flat-square&logo=github)](https://github.com/cmliu/edgetunnel/stargazers)
-[![Forks](https://img.shields.io/github/forks/cmliu/edgetunnel?style=flat-square&logo=github)](https://github.com/cmliu/edgetunnel/network/members)
-[![License](https://img.shields.io/github/license/cmliu/edgetunnel?style=flat-square)](https://github.com/cmliu/edgetunnel/blob/main/LICENSE)
-[![Telegram](https://img.shields.io/badge/Telegram-Group-blue?style=flat-square&logo=telegram)](https://t.me/CMLiussss)
-[![YouTube](https://img.shields.io/badge/YouTube-Channel-red?style=flat-square&logo=youtube)](https://www.youtube.com/watch?v=LeT4jQUh8ok)
-[![zread](https://img.shields.io/badge/Ask_Zread-_.svg?style=flat-square&color=00b0aa&labelColor=000000&logo=data%3Aimage%2Fsvg%2Bxml%3Bbase64%2CPHN2ZyB3aWR0aD0iMTYiIGhlaWdodD0iMTYiIHZpZXdCb3g9IjAgMCAxNiAxNiIgZmlsbD0ibm9uZSIgeG1sbnM9Imh0dHA6Ly93d3cudzMub3JnLzIwMDAvc3ZnIj4KPHBhdGggZD0iTTQuOTYxNTYgMS42MDAxSDIuMjQxNTZDMS44ODgxIDEuNjAwMSAxLjYwMTU2IDEuODg2NjQgMS42MDE1NiAyLjI0MDFWNC45NjAxQzEuNjAxNTYgNS4zMTM1NiAxLjg4ODEgNS42MDAxIDIuMjQxNTYgNS42MDAxSDQuOTYxNTZDNS4zMTUwMiA1LjYwMDEgNS42MDE1NiA1LjMxMzU2IDUuNjAxNTYgNC45NjAxVjIuMjQwMUM1LjYwMTU2IDEuODg2NjQgNS4zMTUwMiAxLjYwMDEgNC45NjE1NiAxLjYwMDFaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00Ljk2MTU2IDEwLjM5OTlIMi4yNDE1NkMxLjg4ODEgMTAuMzk5OSAxLjYwMTU2IDEwLjY4NjQgMS42MDE1NiAxMS4wMzk5VjEzLjc1OTlDMS42MDE1NiAxNC4xMTM0IDEuODg4MSAxNC4zOTk5IDIuMjQxNTYgMTQuMzk5OUg0Ljk2MTU2QzUuMzE1MDIgMTQuMzk5OSA1LjYwMTU2IDE0LjExMzQgNS42MDE1NiAxMy43NTk5VjExLjAzOTlDNS42MDE1NiAxMC42ODY0IDUuMzE1MDIgMTAuMzk5OSA0Ljk2MTU2IDEwLjM5OTlaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik0xMy43NTg0IDEuNjAwMUgxMS4wMzg0QzEwLjY4NSAxLjYwMDEgMTAuMzk4NCAxLjg4NjY0IDEwLjM5ODQgMi4yNDAxVjQuOTYwMUMxMC4zOTg0IDUuMzEzNTYgMTAuNjg1IDUuNjAwMSAxMS4wMzg0IDUuNjAwMUgxMy43NTg0QzE0LjExMTkgNS42MDAxIDE0LjM5ODQgNS4zMTM1NiAxNC4zOTg0IDQuOTYwMVYyLjI0MDFDMTQuMzk4NCAxLjg4NjY0IDE0LjExMTkgMS42MDAxIDEzLjc1ODQgMS42MDAxWiIgZmlsbD0iI2ZmZiIvPgo8cGF0aCBkPSJNNCAxMkwxMiA0TDQgMTJaIiBmaWxsPSIjZmZmIi8%2BCjxwYXRoIGQ9Ik00IDEyTDEyIDQiIHN0cm9rZT0iI2ZmZiIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4K&logoColor=ffffff)](https://zread.ai/cmliu/edgetunnel)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/cmliu/edgetunnel)
+本仓库是面向 Cloudflare Workers 的 Edgetunnel 实现，并扩展了 Xboard 用户白名单与流量回传能力。本文档是本项目的主要运行说明，所有命令默认在仓库根目录执行。
 
----
+## 1. 运行模式
 
-## 📖 项目简介
+项目支持两种互斥的鉴权方式：
 
-**edgetunnel** 是一个基于 CF Workers/Pages 平台的边缘计算隧道解密方案。它能够高效地处理网络流量，并提供强大的管理面板和灵活的节点配置能力。
+| 模式 | 适用场景 | 核心配置 |
+| --- | --- | --- |
+| 个人 UUID 模式 | 个人使用或不接入 Xboard | 配置 `UUID`；不要启用 `XBOARD_KV_REQUIRED` |
+| Xboard 生产模式 | Xboard 用户统一鉴权、停用与流量统计 | 绑定 `XBOARD_KV`，并设置 `XBOARD_KV_REQUIRED="true"` |
 
-- 🖥️ **Demo 演示站点**：[https://EDT-Pages.github.io/admin](https://EDT-Pages.github.io/admin)
+> 生产环境接入 Xboard 时，必须启用 `XBOARD_KV_REQUIRED`。这样即使误删或错误配置 KV binding，Worker 也会显式拒绝鉴权，而不会静默退回个人 UUID 模式。
 
-### ✨ 核心特性
+## 2. 环境要求
 
-- 🛡️ **协议支持**：支持 VLESS、Trojan、Shadowsocks 等主流协议，深度集成加密传输。
-- 📊 **管理面板**：内置可视化后台，支持实时配置修改、日志查看及流量统计。
-- 🛠️ **部署灵活**：完整适配 CF Workers 及 CF Pages (GitHub / 上传)。
-- 🔄 **订阅系统**：内置自动订阅生成及混淆转换，适配主流客户端（Clash, Sing-box, Surge 等）。
-- ⚡ **性能加速**：支持自定义 ProxyIP、SOCKS5/HTTP 链式代理及优选 API，优化网络延迟。
-- 🌐 **多台适配**：完美适配 Windows, Android, iOS, MacOS 及各种软路由固件。
+- Node.js 18 或更高版本，推荐使用当前 LTS。
+- npm 9 或更高版本。
+- Cloudflare 账户。
+- Wrangler CLI；本项目已将 Wrangler 固定在开发依赖中，应优先通过 `npx wrangler` 调用。
 
----
+检查本机环境：
 
-## 💡 快速部署
->[!TIP]
-> 📖 **详尽图文教程**：[edgetunnel 部署指南](https://cmliussss.com/p/edt2/)
+```bash
+node --version
+npm --version
+npx wrangler --version
+```
 
->[!WARNING]
-> ⚠️ **Error 1101问题**：[视频解析](https://www.youtube.com/watch?v=r4uVTEJptdE)
+首次登录 Cloudflare：
 
-### ⚙️ Workers 部署
+```bash
+npx wrangler login
+```
 
-<details>
-<summary><code><strong>「 Workers 部署文字教程 」</strong></code></summary>
+CI/CD 环境不要执行交互式登录，应通过安全变量提供 `CLOUDFLARE_API_TOKEN` 和 `CLOUDFLARE_ACCOUNT_ID`。
 
-1. 部署 CF Worker：
-   - 在 CF Worker 控制台中创建一个新的 Worker。
-   - 将 [worker.js](https://github.com/cmliu/edgetunnel/blob/main/_worker.js) 的内容粘贴到 Worker 编辑器中。
-   - 在左侧的 `设置`选项卡中，选择 `变量` > `添加变量`。
-     变量名称填写**ADMIN**，值则为你的管理员密码，后点击 `保存`即可。
+## 3. 安装依赖
 
-2. 绑定 KV 命名空间：
-   - 在 `绑定`选项卡中选择 `添加绑定 +` > `KV 命名空间` > `添加绑定`，然后选择一个已有的命名空间或创建一个新的命名空间进行绑定。
-   - `变量名称`填写**KV**，然后点击 `添加绑定`即可。
+```bash
+# 按 package-lock.json 安装完全一致的依赖，适合开发机和 CI。
+npm ci
+```
 
-3. 给 Workers绑定 自定义域： 
-   - 在 workers控制台的 `触发器`选项卡，下方点击 `添加自定义域`。
-   - 填入你已转入 CF 域名解析服务的次级域名，例如:`vless.google.com`后 点击`添加自定义域`，等待证书生效即可。
+仅当明确需要升级依赖时才运行 `npm install`，并检查 `package-lock.json` 的变化。
 
-4. 访问后台：
-   - 访问 `https://vless.google.com/admin` 输入管理员密码即可登录后台。
+## 4. 本地开发、检查与测试
 
-</details>
+```bash
+# 将根目录 _worker.js 及其本地模块打包为 dist/worker.js。
+npm run build
 
-### 🛠 Pages 上传 部署方法 **最佳推荐!!!** [图文教程](https://cmliussss.com/p/edt2/)
+# 构建后检查源入口和打包产物的 JavaScript 语法。
+npm run syntax
 
-<details>
-<summary><code><strong>「 Pages 上传文件部署文字教程 」</strong></code></summary>
+# 先自动构建，再运行 test 目录下的全部 Node.js 测试。
+npm test
 
-1. 部署 CF Pages：
-   - 下载 [main.zip](https://github.com/cmliu/edgetunnel/archive/refs/heads/main.zip) 文件，并点上 Star !!!
-   - 在 CF Pages 控制台中选择 `上传资产`后，为你的项目取名后点击 `创建项目`，然后上传你下载好的 [main.zip](https://github.com/cmliu/edgetunnel/archive/refs/heads/main.zip) 文件后点击 `部署站点`。
-   - 部署完成后点击 `继续处理站点` 后，选择 `设置` > `环境变量` > **制作**为生产环境定义变量 > `添加变量`。
-     变量名称填写**ADMIN**，值则为你的管理员密码，后点击 `保存`即可。
-   - 返回 `部署` 选项卡，在右下角点击 `创建新部署` 后，重新上传 [main.zip](https://github.com/cmliu/edgetunnel/archive/refs/heads/main.zip) 文件后点击 `保存并部署` 即可。
+# 执行真实部署前的 Wrangler dry-run，不会发布到 Cloudflare。
+npm run deploy:dry
+```
 
-2. 绑定 KV 命名空间：
-   - 在 `设置`选项卡中选择 `绑定` > `+ 添加` > `KV 命名空间`，然后选择一个已有的命名空间或创建一个新的命名空间进行绑定。
-   - `变量名称`填写**KV**，然后点击 `保存`后重试部署即可。
+本地启动 Worker：
 
-3. 给 Pages绑定 CNAME自定义域：[视频教程](https://www.youtube.com/watch?v=LeT4jQUh8ok&t=851s)
-   - 在 Pages控制台的 `自定义域`选项卡，下方点击 `设置自定义域`。
-   - 填入你的自定义次级域名，注意不要使用你的根域名，例如：
-     您分配到的域名是 `fuck.cloudns.biz`，则添加自定义域填入 `lizi.fuck.cloudns.biz`即可；
-   - 按照 CF 的要求将返回你的域名DNS服务商，添加 该自定义域 `lizi`的 CNAME记录 `edgetunnel.pages.dev` 后，点击 `激活域`即可。
-   
-4. 访问后台：
-   - 访问 `https://lizi.fuck.cloudns.biz/admin` 输入管理员密码即可登录后台。
+```bash
+# 先生成 dist/worker.js。
+npm run build
 
-</details>
+# 使用 wrangler.toml 启动本地开发服务。
+npx wrangler dev
+```
 
-### 🛠 Pages + GitHub 部署方法
+修改 `_worker.js` 或 `src/` 后需要重新运行 `npm run build`。提交前至少执行：
 
-<details>
-<summary><code><strong>「 Pages + GitHub 部署文字教程 」</strong></code></summary>
+```bash
+npm run syntax
+npm test
+npm run deploy:dry
+```
 
-1. 部署 CF Pages：
-   - 在 Github 上先 Fork 本项目，并点上 Star !!!
-   - 在 CF Pages 控制台中选择 `连接到 Git`后，选中 `edgetunnel`项目后点击 `开始设置`。
-   - 在 `设置构建和部署`页面下方，选择 `环境变量（高级）`后并 `添加变量`
-     变量名称填写**ADMIN**，值则为你的管理员密码，后点击 `保存并部署`即可。
+## 5. Wrangler 基础配置
 
-2. 绑定 KV 命名空间：
-   - 在 `设置`选项卡中选择 `绑定` > `+ 添加` > `KV 命名空间`，然后选择一个已有的命名空间或创建一个新的命名空间进行绑定。
-   - `变量名称`填写**KV**，然后点击 `保存`后重试部署即可。
+主配置文件是 `wrangler.toml`：
 
-3. 给 Pages绑定 CNAME自定义域：[视频教程](https://www.youtube.com/watch?v=LeT4jQUh8ok&t=851s)
-   - 在 Pages控制台的 `自定义域`选项卡，下方点击 `设置自定义域`。
-   - 填入你的自定义次级域名，注意不要使用你的根域名，例如：
-     您分配到的域名是 `fuck.cloudns.biz`，则添加自定义域填入 `lizi.fuck.cloudns.biz`即可；
-   - 按照 CF 的要求将返回你的域名DNS服务商，添加 该自定义域 `lizi`的 CNAME记录 `edgetunnel.pages.dev` 后，点击 `激活域`即可。
+```toml
+name = "v20251104"          # Cloudflare Worker 名称，可按环境修改
+main = "dist/worker.js"     # npm run build 生成的部署入口
+compatibility_date = "2025-11-04"
+keep_vars = true             # 部署时保留控制台中已有的变量和 Secret
+```
 
-4. 访问后台：
-   - 访问 `https://lizi.fuck.cloudns.biz/admin` 输入管理员密码即可登录后台。
+修改 `name` 后应先确认没有覆盖错误的 Worker。`compatibility_date` 的升级需要单独测试，不要在普通文档或配置整理中顺手更新。
 
-</details>
+## 6. 个人 UUID 模式配置
 
----
+最小配置是 `UUID`。敏感值建议使用 Wrangler Secret，不要直接写入 `wrangler.toml`：
 
-## 🔑 环境变量说明
+```bash
+# 按提示输入 VLESS UUID。
+npx wrangler secret put UUID
 
-| 变量名 | 必填 | 示例 | 详细备注 |
-| :--- | :---: | :--- | :--- |
-| **ADMIN** | ✅ | `123456` | 后台管理面板登录密码 |
-| **KEY** | ❌ | `CMLiussss` | 快速订阅路径密钥，访问 `/CMLiussss` 即可快速获取节点 |
-| **UUID** | ❌ | `90cd4a77-141a-43c9-991b-08263cfe9c10` | 强制固定UUID，只支持**UUIDv4**标准格式 |
-| **PROXYIP** | ❌ | `proxyip.cmliussss.net:443` | 全局自定义反代 IP  |
-| **URL** | ❌ | `https://cloudflare-error-page-3th.pages.dev` | 默认主页伪装地址（可填写网页 URL 或 `1101`） |
-| **GO2SOCKS5** | ❌ | `blog.cmliussss.com`,`*.ip111.cn`,`*google.com` | 强制走 SOCKS5 的名单 (`*` 为全局，域名用逗号分隔) |
-| **DEBUG** | ❌ | `1`或`true` | **开发者模式**，默认关闭调试日志功能（console.log），设置`1`或`true`则开启调试日志功能 |
-| **OFF_LOG** | ❌ | `1`或`true` | 默认开启日志记录功能，设置`1`或`true`则关闭日志记录功能 |
-| **BEST_SUB** | ❌ | `1`或`true` | 默认关闭作为**优选订阅生成器**的功能，设置`1`或`true`则开启该功能 |
-| **PRELOAD_RACE_DIAL** | ❌ | `1`或`true` | 默认关闭作为**预加载竞速拨号**的功能，设置`1`或`true`则开启该功能 |
-| **TCP_CONCURRENT_DIAL**   | ❌ | `2` | **TCP 并发拨号数**，默认值为`2`；设置后不再根据中国移动网络自动降为单路 |
-| **PROXY_CONCURRENT_DIAL** | ❌ | `1` | **反代并发拨号数**，默认值为`1`；数值越高连接速度越快，但 IP 切换也越频繁 |
+# 可选：设置管理页面密码；未设置时程序会按现有兼容逻辑选择其他凭据。
+npx wrangler secret put ADMIN
 
----
+# 可选：覆盖默认加密密钥。
+npx wrangler secret put KEY
+```
 
-## 🔧 高级实用技巧
-如需修改 **订阅地址里的TOKEN** 和 **用于节点验证的UUID** ，可通过修改变量
-1. 修改`ADMIN`或`KEY`变量的值，可以随机修改 **订阅地址里的TOKEN** 和 **用于节点验证的UUID**
-2. 设置`UUID`变量可以强制固定 **订阅地址里的TOKEN** 和 **用于节点验证的UUID**，注意必须是**UUIDv4**标准格式，否则会导致节点无法使用。
+个人模式下：
 
-本工具支持通过 **PATH路径** 动态切换底层代理方案：
+- 不配置 `XBOARD_KV`；
+- 不设置 `XBOARD_KV_REQUIRED`，或显式设置为 `false`；
+- Worker 使用 `UUID` 进行鉴权。
 
-- 指定 `PROXYIP` 案例
-   ```url
-   /proxyip=proxyip.cmliussss.net
-   /?proxyip=proxyip.cmliussss.net
-   ```
+## 7. Xboard 生产模式配置
 
-- 指定 `SOCKS5` 案例
-   ```url
-   /socks5=user:password@127.0.0.1:1080
-   /?socks5=user:password@127.0.0.1:1080
-   /socks://dXNlcjpwYXNzd29yZA==@127.0.0.1:1080 (默认激活全局SOCKS5)
-   /socks5://user:password@127.0.0.1:1080 (默认激活全局SOCKS5)
-   ```
+### 7.1 创建 Cloudflare KV namespace
 
-- 指定 `HTTP代理` 案例
-   ```url
-   /http=user:password@127.0.0.1:1080
-   /http://user:password@127.0.0.1:8080 (默认激活全局SOCKS5)
-   ```
+```bash
+# 创建用于保存 Xboard 白名单快照的 KV namespace。
+npx wrangler kv namespace create XBOARD_KV
+```
 
-- 指定 `Trojan fallback` 案例（由于使用场景为自建对接, 仅 Trojan 入站，fallback 服务需为同密码、非 WebSocket、非 TLS. 此时 UDP 透传给 fallback, 性能优秀, 功能完整）
-   ```url
-   /trojan=1.1.1.1:1234
-   ```
+命令会返回 namespace ID。将它写入本地或私有部署配置，不要把真实 ID、API Token 或账户信息提交到公开仓库。
 
----
+### 7.2 配置绑定和生产防护
 
-## 💻 客户端适配情况
+在 `wrangler.toml` 中启用：
 
-| 平台 | 推荐客户端 |
-| :--- | :--- |
-| **Windows** | [v2rayN](https://github.com/2dust/v2rayN/releases)、[Hiddify](https://github.com/hiddify/hiddify-app/releases)、[FlClash](https://github.com/chen08209/FlClash/releases)、[mihomo-party](https://github.com/mihomo-party-org/clash-party/releases)、[Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev/releases)、[Clashmi](https://github.com/KaringX/clashmi/releases)、[FlyClash](https://github.com/GtxFury/FlyClash/releases)、[Karing](https://github.com/KaringX/karing/releases)、[Bettbox](https://github.com/appshubcc/Bettbox/releases) |
-| **Android** | [v2rayNG](https://github.com/2dust/v2rayNG/releases)、[ClashMetaForAndroid](https://github.com/MetaCubeX/ClashMetaForAndroid/releases/)、[FlClash](https://github.com/chen08209/FlClash/releases)、[Clashmi](https://github.com/KaringX/clashmi/releases)、[Hiddify](https://github.com/hiddify/hiddify-app/releases)、[NekoBox](https://github.com/MatsuriDayo/NekoBoxForAndroid/releases)、[FlyClash](https://github.com/GtxFury/FlyClash/releases)、[Karing](https://github.com/KaringX/karing/releases)、[Bettbox](https://github.com/appshubcc/Bettbox/releases) |
-| **iOS** | Surge、Shadowrocket、Stash、[Hiddify](https://github.com/hiddify/hiddify-app/releases)、Loon、Egern、[Clashmi](https://clashmi.app/download)、[Karing](https://karing.app/)、Quantumult X |
-| **macOS** | [FlClash](https://github.com/chen08209/FlClash/releases)、[mihomo-party](https://github.com/mihomo-party-org/clash-party/releases)、[Clash Verge Rev](https://github.com/clash-verge-rev/clash-verge-rev/releases)、Surge、[Clashmi](https://clashmi.app/download)、[Karing](https://karing.app/)、[FlyClash](https://github.com/GtxFury/FlyClash/releases) |
-| **鸿蒙** | [ClashBox](https://github.com/xiaobaigroup/ClashBox/releases) |
----
+```toml
+[vars]
+# 启用后，如果 XBOARD_KV 缺失或不是有效 KV binding，Worker 将显式失败。
+XBOARD_KV_REQUIRED = "true"
 
-## ⭐ 项目热度
+[[kv_namespaces]]
+# binding 名称必须固定为 XBOARD_KV，不能自行改名。
+binding = "XBOARD_KV"
+id = "替换为实际的_KV_NAMESPACE_ID"
+```
 
-![Stargazers over time](https://github.com/cmliu/cmliu/blob/main/star/edgetunnel.svg)
+`XBOARD_KV_REQUIRED` 以下值会被识别为开启：
 
----
+- 布尔值 `true`；
+- 数字 `1`；
+- 忽略大小写和首尾空白的字符串 `"true"`；
+- 字符串 `"1"`。
 
-## 🙏 特别鸣谢
-### 💖 赞助支持 - 提供云服务器维持[订阅转换服务](https://sub.cmliussss.net/)
-- [Alice](https://url.cmliussss.com/alice)
-- [EasyLinks](https://www.vmrack.net?ref_code=5Zk7eNhbgL7)
-- [ZMTO(VTEXS)](https://zmto.com/?affid=1532)
+生产环境推荐固定使用字符串 `"true"`。
 
-### 🛠 开源代码引用
-- [zizifn/edgetunnel](https://github.com/zizifn/edgetunnel)
-- [3Kmfi6HP/EDtunnel](https://github.com/6Kmfi6HP/EDtunnel)
-- [SHIJS1999/cloudflare-worker-vless-ip](https://github.com/SHIJS1999/cloudflare-worker-vless-ip)
-- [Stanley-baby](https://github.com/Stanley-baby)
-- [ACL4SSR](https://github.com/ACL4SSR/ACL4SSR/tree/master/Clash/config)
-- [股神](https://t.me/CF_NAT/38889)
-- [Workers/Pages Metrics](https://t.me/zhetengsha/3382)
-- [白嫖哥](https://t.me/bestcfipas)
-- [Mingyu](https://github.com/ymyuuu/workers-vless)
-- [ToiCF/CF-Workers-HTTPS](https://github.com/ToiCF/CF-Workers-HTTPS)
-- [ToiCF/CF-Workers-TURN](https://github.com/ToiCF/CF-Workers-TURN)
-- [ToiCF/CF-Workers-SoftEther](https://github.com/ToiCF/CF-Workers-SoftEther)
-- [eooce](https://github.com/eooce/Cloudflare-proxy)
-- [Sukka](https://ip.skk.moe/)
-- [zhangtaile](https://github.com/cmliu/edgetunnel/pull/999)
-- [1345695](https://github.com/1345695/edcloudwasm)
-- [ToiCF/GrainTCP](https://github.com/ToiCF/GrainTCP)
+### 7.3 缺失 KV 时的显式失败策略
 
----
+启用 `XBOARD_KV_REQUIRED` 后：
 
-## ⚠️ 免责声明
+1. `XBOARD_KV` 未绑定，或者绑定对象不具备 KV 的 `get()` 能力；
+2. Worker 立即进入 Xboard fail-closed；
+3. 不使用内存中的旧快照；
+4. 不读取旧 Secret fallback；
+5. 所有 Xboard UUID 鉴权均被拒绝，并记录稳定错误：
 
-1. 本项目（"edgetunnel"）仅供**教育、科学研究及个人安全测试**之目的。
-2. 使用者在下载或使用本项目代码时，必须严格遵守所在地区的法律法规。
-3. 作者 **cmliu** 对任何滥用本项目代码导致的行为或后果均不承担任何责任。
-4. 本项目不对因使用代码引起的任何直接或间接损害负责。
-5. 建议在测试完成后 24 小时内删除本项目相关部署。
+```text
+XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
+```
 
----
+未启用该开关且未绑定 KV 时，项目仍保留个人 UUID 模式，以兼容原有部署。
 
-**如果您觉得项目对您有帮助，请给一个 Star 🌟，这是对我最大的鼓励！**
+### 7.4 Xboard 快照读取参数
+
+| 变量 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `XBOARD_CACHE_TTL_SECONDS` | `30` | 正常 KV 快照在 Worker 内存中的短缓存时间 |
+| `XBOARD_MAX_STALE_SECONDS` | `600` | KV 读取异常时，已有有效快照允许继续使用的最长时间 |
+
+`XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
+
+### 7.5 流量回传参数
+
+| 变量 | 是否必需 | 说明 |
+| --- | --- | --- |
+| `XBOARD_API_BASE` | 启用回传时必需 | Xboard API 地址，末尾 `/` 会自动移除 |
+| `XBOARD_NODE_ID` | 启用回传时必需 | 对应的 Xboard 节点 ID |
+| `XBOARD_SERVER_TOKEN` | 启用回传时必需 | 服务端鉴权令牌，应使用 Secret |
+| `XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS` | 否 | 流量批量推送间隔，默认 `60` 秒 |
+| `XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS` | 否 | 无主流量记录的保留时间 |
+
+设置敏感令牌：
+
+```bash
+npx wrangler secret put XBOARD_SERVER_TOKEN
+```
+
+完整的 Xboard 联合部署、快照协议、队列超时和生产验证步骤见 Xboard 仓库的 `docs/edgetunnel-xboard-deployment.md`。
+
+## 8. 其他常用 Worker 变量
+
+| 变量 | 作用 | 建议 |
+| --- | --- | --- |
+| `HOST` | 限制或指定访问域名 | 多个值按项目现有数组格式配置 |
+| `PATH` | 指定访问路径 | 不以 `/` 开头时程序会自动补齐 |
+| `PROXYIP` | 配置反代 IP | 部署前验证可用性 |
+| `URL` | 配置伪装页地址或类型 | 默认值为 `nginx` |
+| `DEBUG` | 开启调试日志 | 仅排障时使用 `true` 或 `1` |
+| `OFF_LOG` | 关闭 KV 日志 | `true` 或 `1` 表示关闭 |
+| `BEST_SUB` | 开启优选订阅逻辑 | 使用前确认订阅生成流程 |
+| `PRELOAD_RACE_DIAL` | 开启预加载竞速拨号 | 仅在验证收益后启用 |
+| `PROXY_CONCURRENT_DIAL` | 反代并发拨号数 | 必须是大于等于 1 的整数 |
+| `TCP_CONCURRENT_DIAL` | TCP 并发拨号数 | 必须是大于等于 1 的整数 |
+| `GO2SOCKS5` | 扩展 SOCKS5 白名单 | 仅配置可信目标 |
+| `KV` | 旧有日志等功能使用的 KV binding | 不等同于 `XBOARD_KV`，不要混用 |
+
+`PASSWORD`、`TOKEN`、`KEY`、`UUID` 等凭据应使用 Secret 管理。
+
+## 9. 部署与回滚
+
+### 9.1 Workers 部署
+
+```bash
+# 1. 安装依赖。
+npm ci
+
+# 2. 运行测试与部署预检。
+npm test
+npm run deploy:dry
+
+# 3. 发布到 wrangler.toml 中 name 指定的 Worker。
+npx wrangler deploy
+```
+
+查看实时日志：
+
+```bash
+npx wrangler tail
+```
+
+回滚时不要直接删除 KV namespace。应先恢复上一版代码或配置，然后重新部署，并确认 Xboard 白名单快照仍可读取。
+
+### 9.2 Cloudflare Pages
+
+本仓库支持由 GitHub 提交触发 Cloudflare Pages 自动构建。`npm run build:pages` 会先生成 Workers 使用的 `dist/worker.js`，再复制为 Pages Functions 入口 `dist-pages/_worker.js`；`dist-pages/` 是临时构建产物，不提交到 Git。
+
+Cloudflare Pages 项目使用以下 Git 构建配置：
+
+```text
+Production branch: main
+Build command: npm ci && npm run build:pages
+Build output directory: dist-pages
+Root directory: GitHub 仓库就是 edgetunnel 时留空或填写 /；仅当仓库是 monorepo 时填写 edgetunnel
+```
+
+在 Pages 项目的 **Settings → Bindings** 中为 Production 和 Preview 分别确认：
+
+```text
+Variable name: XBOARD_KV
+KV namespace: 选择 Xboard 写入快照所使用的同一个 namespace
+```
+
+在 **Settings → Variables and Secrets** 中为 Production 和 Preview 设置：
+
+```env
+XBOARD_KV_REQUIRED=true
+```
+
+`XBOARD_KV_REQUIRED=true` 是生产防护开关。如果 `XBOARD_KV` 缺失或不是有效 KV binding，Pages 运行时会显式失败，不会静默退回个人 UUID 模式。不要在 Pages 中配置 `127.0.0.1` 或 `localhost` 作为 Xboard 回传地址，因为 Cloudflare 无法访问你的本机 Laragon 服务。
+
+本地只验证 Pages 构建产物，不会执行部署：
+
+```bash
+npm ci
+npm run build:pages
+node --check dist-pages/_worker.js
+```
+
+最终提交并推送到 GitHub 后，Cloudflare Pages 才会按上述配置自动部署。提交前不要把真实 UUID、Cloudflare Token、账户 ID 或 KV namespace ID 写入仓库。
+
+## 10. Xboard 联调顺序
+
+建议严格按以下顺序上线：
+
+1. 创建 Cloudflare KV namespace；
+2. 在 Worker/Pages 中绑定为 `XBOARD_KV`；
+3. 配置 `XBOARD_KV_REQUIRED=true`；
+4. 在 Xboard 中配置 Cloudflare namespace ID、账户 ID 和 API Token；
+5. 在 Xboard 执行 `php artisan edgetunnel:sync-whitelist --dry-run`；
+6. 确认 UUID 数量正确后执行真实同步；
+7. 运行 `npm run deploy:dry`；
+8. 发布 Worker；
+9. 按 Xboard 生产检查清单验证正常用户、禁用用户和 KV 故障场景。
+
+## 11. 常见问题
+
+### Worker 提示缺少 `XBOARD_KV`
+
+确认 `wrangler.toml` 或 Cloudflare 控制台中存在 binding，且名称严格为 `XBOARD_KV`。namespace 的显示名称可以不同，但 binding 名称不能变化。
+
+### 开启生产防护后所有用户都无法连接
+
+先查看 `npx wrangler tail`。如果出现缺失 binding 的稳定错误，应恢复正确的 KV binding，而不是关闭 `XBOARD_KV_REQUIRED`。如果 binding 正常，再检查 KV 中是否已经发布 `xboard:snapshot`。
+
+### 修改源码后部署内容没有变化
+
+Wrangler 入口是 `dist/worker.js`，部署前必须重新执行 `npm run build`。`npm run deploy:dry` 和 `npx wrangler deploy` 会读取该入口。
+
+### 本地测试成功但线上失败
+
+重点核对 Cloudflare 环境中的 Variables、Secrets、KV bindings 和 Worker 名称。`wrangler.toml` 的注释模板不会自动创建线上资源。
+
+## 12. 安全与发布要求
+
+- 不提交真实 UUID、管理员密码、Server Token、Cloudflare API Token 或 KV namespace ID。
+- 生产 Xboard 部署必须启用 `XBOARD_KV_REQUIRED=true`。
+- 紧急撤权应发布合法的空白名单快照，不要通过删除 KV binding 实现。
+- 发布前必须执行测试和 dry-run；dry-run 成功不等于已完成真实生产验证。
+- 本项目仅供合法、合规的网络与系统管理场景使用，使用者需自行承担部署和运营责任。

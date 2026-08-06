@@ -59,12 +59,16 @@ function snapshot(uuids = [UUID_A], userMap = { [UUID_A]: 1 }, overrides = {}) {
   });
 }
 
-function assertFailClosed(result, messagePattern = null) {
+function assertFailClosed(result, messagePattern = null, loadedAt = null) {
   assert.equal(result.mode, 'xboard');
+  assert.equal(result.version, '');
+  assert.equal(result.generatedAt, '');
+  assert.equal(result.serverId, null);
   assert.deepEqual([...result.uuids], []);
   assert.deepEqual(result.userMap, {});
   assert.equal(result.failClosed, true);
   assert.equal(result.stale, false);
+  if (loadedAt !== null) assert.equal(result.loadedAt, loadedAt);
   if (messagePattern) assert.match(result.error, messagePattern);
 }
 
@@ -116,15 +120,59 @@ test('有 XBOARD_KV 时只读取固定 snapshot key，不读取任何 Secret fal
   assert.deepEqual(store.calls, ['xboard:snapshot']);
 });
 
-test('没有 XBOARD_KV 时保持个人单 UUID 模式，忽略旧 Secret 变量', async () => {
-  const result = await readXboardAccessContext({
-    XBOARD_UUIDS: UUID_B,
-    XBOARD_USER_MAP: JSON.stringify({ [UUID_B]: 2 }),
-  }, 3_000);
+test('没有 XBOARD_KV 且未启用强制绑定时保持个人单 UUID 模式，忽略旧 Secret 变量', async () => {
+  for (const required of [undefined, false, 0, 'false', '0']) {
+    const result = await readXboardAccessContext({
+      XBOARD_KV_REQUIRED: required,
+      XBOARD_UUIDS: UUID_B,
+      XBOARD_USER_MAP: JSON.stringify({ [UUID_B]: 2 }),
+    }, 3_000);
 
-  assert.equal(result.mode, 'personal');
-  assert.equal(result.uuids, null);
-  assert.deepEqual(result.userMap, {});
+    assert.equal(result.mode, 'personal');
+    assert.equal(result.uuids, null);
+    assert.deepEqual(result.userMap, {});
+    assert.equal(result.failClosed, false);
+  }
+});
+
+test('XBOARD_KV_REQUIRED 启用且缺少绑定时 fail-closed，不复用缓存或旧 Secret', async () => {
+  await readXboardAccessContext({ XBOARD_KV: kv({ 'xboard:snapshot': snapshot() }) }, 2_000);
+
+  for (const required of [true, 1, 'true', ' TRUE ', '1']) {
+    const result = await readXboardAccessContext({
+      XBOARD_KV_REQUIRED: required,
+      XBOARD_UUIDS: UUID_B,
+      XBOARD_USER_MAP: JSON.stringify({ [UUID_B]: 2 }),
+    }, 3_000);
+
+    assertFailClosed(result, /XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled\./, 3_000);
+    assert.equal(result.error, 'XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.');
+  }
+});
+
+test('XBOARD_KV_REQUIRED 启用且 binding 无效时 fail-closed', async () => {
+  for (const invalidBinding of [{}, { get: null }]) {
+    const result = await readXboardAccessContext({
+      XBOARD_KV_REQUIRED: 'true',
+      XBOARD_KV: invalidBinding,
+    }, 3_500);
+
+    assertFailClosed(result, /XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled\./, 3_500);
+  }
+});
+
+test('XBOARD_KV_REQUIRED 启用且绑定有效时正常加载快照', async () => {
+  const store = kv({ 'xboard:snapshot': snapshot() });
+  const result = await readXboardAccessContext({
+    XBOARD_KV_REQUIRED: 'true',
+    XBOARD_KV: store,
+  }, 4_000);
+
+  assert.equal(result.mode, 'xboard');
+  assert.deepEqual([...result.uuids], [UUID_A]);
+  assert.deepEqual(result.userMap, { [UUID_A]: 1 });
+  assert.equal(result.failClosed, false);
+  assert.deepEqual(store.calls, ['xboard:snapshot']);
 });
 
 test('仅 KV 读取异常可复用未超过 600 秒的旧快照，超过后 fail-closed', async () => {

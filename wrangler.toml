@@ -3,9 +3,14 @@ main = "dist/worker.js"
 compatibility_date = "2025-11-04"
 keep_vars = true
 
-# Production Xboard authorization uses this exact binding name.
-# Create/select the KV namespace first, then uncomment and replace the placeholder.
-# Never commit a real namespace ID to a public repository.
+# Xboard 生产部署必须先绑定 XBOARD_KV，再启用此防护开关。
+# 个人单 UUID 部署应保持未设置，或显式设置为 false。
+# [vars]
+# XBOARD_KV_REQUIRED = "true"
+
+# Xboard 生产鉴权使用固定 binding 名称 XBOARD_KV。
+# 先创建或选择 KV namespace，再取消注释并替换下面的占位 ID。
+# 不要把真实 namespace ID、API Token 或账户信息提交到公开仓库。
 # [[kv_namespaces]]
 # binding = "XBOARD_KV"
 # id = "REPLACE_WITH_KV_NAMESPACE_ID"

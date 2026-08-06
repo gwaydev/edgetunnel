@@ -104,9 +104,23 @@ function createXboardFailClosedContext(now, error, stale = false) {
 	};
 }
 
+function isXboardKvRequired(value) {
+	if (value === true || value === 1) return true;
+	if (typeof value !== 'string') return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized === 'true' || normalized === '1';
+}
+
 export async function readXboardAccessContext(env = {}, now = Date.now(), force = false) {
 	const kv = env.XBOARD_KV;
 	if (!kv || typeof kv.get !== 'function') {
+		if (isXboardKvRequired(env.XBOARD_KV_REQUIRED)) {
+			return createXboardFailClosedContext(
+				now,
+				new Error('XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.'),
+				false,
+			);
+		}
 		return { mode: 'personal', version: '', generatedAt: '', serverId: null, uuids: null, userMap: {}, loadedAt: now, stale: false, failClosed: false };
 	}
 

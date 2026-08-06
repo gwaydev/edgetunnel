@@ -3,6 +3,7 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:pages": "npm run build && node scripts/prepare-pages.mjs",
     "syntax": "npm run build && node --check _worker.js && node --check dist/worker.js",
     "pretest": "npm run build",
     "test": "node --test test/*.test.mjs",

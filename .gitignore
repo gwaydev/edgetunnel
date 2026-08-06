@@ -10,6 +10,7 @@ pnpm-lock.yaml
 
 # 构建产物
 dist/
+dist-pages/
 build/
 *.wasm
 GRAINTCP_*
