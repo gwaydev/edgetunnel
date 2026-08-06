@@ -5,6 +5,7 @@ import {
 	resetXboardSnapshotStateForTest,
 } from './src/xboard-snapshot.js';
 import { createTrafficAccumulator } from './src/xboard-traffic.js';
+import { createOnlineAccumulator, readXboardClientIp } from './src/xboard-online.js';
 
 const Version = '2026-07-11 19:02:35';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
@@ -32,6 +33,9 @@ const Xboard流量累加器 = createTrafficAccumulator({
 	fetchImpl: (...args) => fetch(...args),
 	log,
 });
+const Xboard在线累加器 = createOnlineAccumulator({
+	fetchImpl: (...args) => fetch(...args),
+});
 
 function 安排Xboard流量推送(env, ctx, userMap, force = false, accumulator = Xboard流量累加器) {
 	const task = (force ? accumulator.flush(env, userMap, Date.now()) : accumulator.push(env, userMap, Date.now()))
@@ -40,20 +44,64 @@ function 安排Xboard流量推送(env, ctx, userMap, force = false, accumulator 
 	return task;
 }
 
-function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard流量累加器) {
+function 安排Xboard在线推送(env, ctx, userMap, force = false, accumulator = Xboard在线累加器) {
+	const task = (force ? accumulator.flush(env, userMap, Date.now()) : accumulator.push(env, userMap, Date.now()))
+		.catch(error => log(`[Xboard在线] 上报失败: ${error?.message || error}`));
+	if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
+	return task;
+}
+
+function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard流量累加器, request = null, onlineAccumulator = Xboard在线累加器, timerApi = globalThis) {
 	const uuid = 规范化XboardUUID(uuidValue);
 	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
+	const userMap = accessContext.userMap || {};
+	const clientIp = readXboardClientIp(request);
+	const configuredInterval = env?.XBOARD_ONLINE_PUSH_INTERVAL_SECONDS;
+	const parsedInterval = configuredInterval === undefined ? 60 : Number(configuredInterval);
+	const heartbeatIntervalMs = Number.isFinite(parsedInterval) && parsedInterval > 0
+		? Math.min(240, Math.max(1, parsedInterval)) * 1000
+		: 0;
+	const setTimer = typeof timerApi?.setTimeout === 'function' ? timerApi.setTimeout.bind(timerApi) : null;
+	const clearTimer = typeof timerApi?.clearTimeout === 'function' ? timerApi.clearTimeout.bind(timerApi) : null;
+	let heartbeatTimer = null;
+	let stopped = false;
+	let stopPromise = null;
+	const 记录在线 = () => {
+		if (stopped || !clientIp || !onlineAccumulator.add(uuid, clientIp)) return Promise.resolve(false);
+		return 安排Xboard在线推送(env, ctx, userMap, false, onlineAccumulator);
+	};
+	const 安排在线心跳 = () => {
+		if (stopped || !clientIp || heartbeatIntervalMs <= 0 || !setTimer) return;
+		heartbeatTimer = setTimer(async () => {
+			heartbeatTimer = null;
+			if (stopped) return;
+			await 记录在线();
+			安排在线心跳();
+		}, heartbeatIntervalMs);
+	};
+	记录在线();
+	安排在线心跳();
 	const 记录 = (upload, download) => {
 		accumulator.add(uuid, upload, download);
-		安排Xboard流量推送(env, ctx, accessContext.userMap || {}, false, accumulator);
+		安排Xboard流量推送(env, ctx, userMap, false, accumulator);
+		记录在线();
 	};
 	return {
 		上传(bytes) { 记录(bytes, 0) },
 		下载(bytes) { 记录(0, bytes) },
-		推送() { return 安排Xboard流量推送(env, ctx, accessContext.userMap || {}, true, accumulator) },
+		推送() {
+			if (stopPromise) return stopPromise;
+			stopped = true;
+			if (heartbeatTimer !== null && clearTimer) clearTimer(heartbeatTimer);
+			heartbeatTimer = null;
+			stopPromise = Promise.all([
+				安排Xboard流量推送(env, ctx, userMap, true, accumulator),
+				安排Xboard在线推送(env, ctx, userMap, false, onlineAccumulator),
+			]);
+			return stopPromise;
+		},
 	};
 }
-
 function 重置Xboard状态() {
 	resetXboardSnapshotStateForTest();
 }
@@ -599,7 +647,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 		return new Response('UDP is not supported', { status: 400 });
 	}
 	const Xboard流量记录器 = !首包.isUDP && 首包.协议 === 'vless'
-		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx)
+		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx, Xboard流量累加器, request)
 		: null;
 
 	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
@@ -1130,7 +1178,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID, accessContext);
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 								const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-								Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx) : null;
+								Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request) : null;
 								log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 								if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 								if (isUDP) {
@@ -1561,7 +1609,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 			const 解析结果 = 解析魏烈思请求(bytes, yourUUID, accessContext);
 			if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 			const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-			Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx) : null;
+			Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request) : null;
 			if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 			if (isUDP) {
 				if (port === 53) isDnsQuery = true;

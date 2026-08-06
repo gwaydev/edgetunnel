@@ -7,6 +7,7 @@ import {
   resetXboardSnapshotStateForTest,
 } from '../src/xboard-snapshot.js';
 import { createTrafficAccumulator } from '../src/xboard-traffic.js';
+import { createOnlineAccumulator } from '../src/xboard-online.js';
 import {
   解析VLESSUUID,
   校验VLESSUUID,
@@ -349,6 +350,109 @@ test('流量记录器只接受通过 Xboard 快照认证的 UUID', async () => {
   assert.deepEqual(traffic.snapshot(), { [UUID_B]: [12, 34] });
 });
 
+test('通过 Xboard 快照认证的连接会把 Cloudflare 客户端 IP 上报到 alive', async () => {
+  const requests = [];
+  const waits = [];
+  const online = createOnlineAccumulator({
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return new Response('{}', { status: 200 });
+    },
+  });
+  const traffic = {
+    add() {},
+    push: async () => false,
+    flush: async () => false,
+  };
+  const env = {
+    XBOARD_API_BASE: 'https://xboard.example',
+    XBOARD_NODE_ID: '9',
+    XBOARD_SERVER_TOKEN: 'secret',
+    XBOARD_ONLINE_PUSH_INTERVAL_SECONDS: '0',
+  };
+  const access = { mode: 'xboard', uuids: new Set([UUID_B]), userMap: { [UUID_B]: 2 } };
+  const request = new Request('https://worker.example/ws', {
+    headers: { 'CF-Connecting-IP': '203.0.113.7' },
+  });
+  const ctx = { waitUntil(task) { waits.push(task); } };
+
+  const recorder = 创建Xboard流量记录器(UUID_B, access, env, ctx, traffic, request, online);
+  assert.ok(recorder);
+  await Promise.all(waits);
+
+  assert.equal(requests.length, 1);
+  assert.equal(new URL(requests[0].url).pathname, '/api/v1/server/UniProxy/alive');
+  assert.equal(new URL(requests[0].url).searchParams.get('merge'), '1');
+  assert.deepEqual(JSON.parse(requests[0].init.body), { 2: ['203.0.113.7'] });
+});
+test('在线记录器周期刷新空闲连接，并在收尾时停止且不强制 alive', async () => {
+  const waits = [];
+  const timers = [];
+  const clearedTimers = [];
+  const onlineCalls = { add: 0, push: 0, flush: 0 };
+  const online = {
+    add() {
+      onlineCalls.add++;
+      return true;
+    },
+    async push() {
+      onlineCalls.push++;
+      return true;
+    },
+    async flush() {
+      onlineCalls.flush++;
+      return true;
+    },
+  };
+  const traffic = {
+    add() {},
+    push: async () => false,
+    flush: async () => true,
+  };
+  const timerApi = {
+    setTimeout(callback, delay) {
+      timers.push({ callback, delay });
+      return timers.length;
+    },
+    clearTimeout(timerId) {
+      clearedTimers.push(timerId);
+    },
+  };
+  const env = {
+    XBOARD_API_BASE: 'https://xboard.example',
+    XBOARD_NODE_ID: '9',
+    XBOARD_SERVER_TOKEN: 'secret',
+    XBOARD_ONLINE_PUSH_INTERVAL_SECONDS: '60',
+  };
+  const access = { mode: 'xboard', uuids: new Set([UUID_B]), userMap: { [UUID_B]: 2 } };
+  const request = new Request('https://worker.example/ws', {
+    headers: { 'CF-Connecting-IP': '203.0.113.7' },
+  });
+  const ctx = { waitUntil(task) { waits.push(task); } };
+
+  const recorder = 创建Xboard流量记录器(UUID_B, access, env, ctx, traffic, request, online, timerApi);
+  await Promise.all(waits.splice(0));
+
+  assert.equal(onlineCalls.add, 1);
+  assert.equal(onlineCalls.push, 1);
+  assert.equal(timers.length, 1);
+  assert.equal(timers[0].delay, 60_000);
+
+  await timers[0].callback();
+  await Promise.all(waits.splice(0));
+  assert.equal(onlineCalls.add, 2);
+  assert.equal(onlineCalls.push, 2);
+  assert.equal(timers.length, 2);
+
+  await recorder.推送();
+  await Promise.all(waits.splice(0));
+  assert.deepEqual(clearedTimers, [2]);
+  assert.equal(onlineCalls.flush, 0);
+
+  await timers[1].callback();
+  assert.equal(onlineCalls.add, 2);
+  assert.equal(onlineCalls.push, 3);
+});
 test('连接关闭时的强制尾批次绕过常规推送间隔', async () => {
   const traffic = createTrafficHarness();
   const env = {

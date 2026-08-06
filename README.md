@@ -173,7 +173,7 @@ XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
 
 `XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
 
-### 7.5 流量回传参数
+### 7.5 流量与在线设备回传参数
 
 | 变量 | 是否必需 | 说明 |
 | --- | --- | --- |
@@ -181,7 +181,12 @@ XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
 | `XBOARD_NODE_ID` | 启用回传时必需 | 对应的 Xboard 节点 ID |
 | `XBOARD_SERVER_TOKEN` | 启用回传时必需 | 服务端鉴权令牌，应使用 Secret |
 | `XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS` | 否 | 流量批量推送间隔，默认 `60` 秒 |
+| `XBOARD_ONLINE_PUSH_INTERVAL_SECONDS` | 否 | 在线设备心跳间隔，默认 `60` 秒；运行时限制为 `1`～`240` 秒，`0` 仅用于显式禁用心跳/测试 |
 | `XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS` | 否 | 无主流量记录的保留时间 |
+
+Edgetunnel 只读取 Cloudflare 边缘注入的 `CF-Connecting-IP`，不会信任客户端可伪造的 `X-Forwarded-For`、`X-Real-IP` 或 `True-Client-IP`。通过 Xboard 快照认证的 VLESS 连接建立后会调用 `POST /api/v1/server/UniProxy/alive?merge=1`；`merge=1` 让多个 Worker isolate 的设备心跳在 Xboard 中合并，避免后一次上报覆盖其他实例看到的 IP。
+
+连接保持期间即使没有新流量，也会按心跳间隔刷新在线状态，因此生产建议保持 `60` 秒，且不要超过运行时上限 `240` 秒。连接关闭时只停止本地心跳，不会绕过批处理间隔强制发送 alive；Xboard 会在最后一次心跳超过 300 秒后自动把设备判定为离线。`0` 会显式禁用周期心跳，仅适用于测试或临时排障，不建议生产使用。
 
 设置敏感令牌：
 
@@ -257,10 +262,20 @@ KV namespace: 选择 Xboard 写入快照所使用的同一个 namespace
 在 **Settings → Variables and Secrets** 中为 Production 和 Preview 设置：
 
 ```env
+# 生产鉴权防护。
 XBOARD_KV_REQUIRED=true
+
+# Cloudflare Tunnel 暴露的 Xboard HTTPS 地址，不能填写 127.0.0.1 或 localhost。
+XBOARD_API_BASE=https://你的隧道域名
+
+# 与 Xboard 中 Edgetunnel 节点对应的节点 ID。
+XBOARD_NODE_ID=你的节点ID
+
+# 可选；生产建议 60 秒。运行时限制为 1～240 秒，0 仅用于测试，不建议线上使用。
+XBOARD_ONLINE_PUSH_INTERVAL_SECONDS=60
 ```
 
-`XBOARD_KV_REQUIRED=true` 是生产防护开关。如果 `XBOARD_KV` 缺失或不是有效 KV binding，Pages 运行时会显式失败，不会静默退回个人 UUID 模式。不要在 Pages 中配置 `127.0.0.1` 或 `localhost` 作为 Xboard 回传地址，因为 Cloudflare 无法访问你的本机 Laragon 服务。
+将 `XBOARD_SERVER_TOKEN` 配置为 **Secret**，其值必须与 Xboard 后台的服务端 Token 完全一致。`XBOARD_KV_REQUIRED=true` 是生产防护开关；如果 `XBOARD_KV` 缺失或不是有效 KV binding，Pages 运行时会显式失败，不会静默退回个人 UUID 模式。Cloudflare 无法访问你的本机 Laragon 服务，因此 `XBOARD_API_BASE` 必须使用当前可访问的 Cloudflare Tunnel HTTPS 地址。
 
 本地只验证 Pages 构建产物，不会执行部署：
 
