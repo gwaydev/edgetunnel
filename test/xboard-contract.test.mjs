@@ -5,7 +5,8 @@ import { readFile } from 'node:fs/promises';
 import { parseXboardSnapshot } from '../src/xboard-snapshot.js';
 
 const UUID = '11111111-1111-4111-8111-111111111111';
-const fixtureUrl = new URL('../../Xboard/tests/Fixtures/EdgeTunnel/snapshot-v1.json', import.meta.url);
+// 契约夹具随 Edgetunnel 一起版本化，避免 CI 依赖可变的外部 Xboard 默认分支。
+const fixtureUrl = new URL('./fixtures/xboard-snapshot-v1.json', import.meta.url);
 
 test('Xboard schema-v1 fixture is accepted by the worker snapshot parser', async () => {
   const fixture = JSON.parse(await readFile(fixtureUrl, 'utf8'));

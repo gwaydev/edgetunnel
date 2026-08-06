@@ -18,12 +18,6 @@ jobs:
         with:
           path: edgetunnel
 
-      - name: Check out Xboard contract fixture
-        uses: actions/checkout@v4
-        with:
-          repository: gwaydev/Xboard
-          path: Xboard
-
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
