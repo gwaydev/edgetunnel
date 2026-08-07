@@ -13,6 +13,27 @@
 
 > 生产环境接入 Xboard 时，必须启用 `XBOARD_KV_REQUIRED`。这样即使误删或错误配置 KV binding，Worker 也会显式拒绝鉴权，而不会静默退回个人 UUID 模式。
 
+## GitHub 与 Cloudflare Pages 部署关系
+
+本项目不使用 GitHub Actions 进行构建或部署。推送到 GitHub 后，由 Cloudflare Pages 的 GitHub 集成负责拉取仓库、执行构建并发布；因此不要为部署额外配置 GitHub Actions Secrets。
+
+当前保留的两个 fork 原始工作流只用于仓库维护：
+
+- `.github/workflows/sync.yml`：按原 fork 逻辑同步上游仓库；
+- `.github/workflows/Auto-close-empty-PRs.yml`：按原 fork 逻辑处理空内容或说明过短的 PR。
+
+这两个工作流与 Pages 部署相互独立，删除或保留都不会改变 Pages 的自动部署机制。本轮已移除本项目新增的质量工作流，避免重复执行构建、测试和 Wrangler dry-run。
+
+Cloudflare Pages 推荐配置：
+
+```text
+Production branch: main
+Build command: npm ci && npm run build:pages
+Build output directory: dist-pages
+Root directory: 留空（仓库根目录就是 edgetunnel）
+```
+
+`dist/` 和 `dist-pages/` 都是本地或 Pages 构建生成的临时目录，不应提交到 Git。
 ## 2. 环境要求
 
 - Node.js 18 或更高版本，推荐使用当前 LTS。
@@ -51,10 +72,7 @@ npm ci
 # 将根目录 _worker.js 及其本地模块打包为 dist/worker.js。
 npm run build
 
-# 构建后检查源入口和打包产物的 JavaScript 语法。
-npm run syntax
-
-# 先自动构建，再运行 test 目录下的全部 Node.js 测试。
+# 运行精简后的核心回归测试，不会访问线上 Xboard 或 Cloudflare。
 npm test
 
 # 执行真实部署前的 Wrangler dry-run，不会发布到 Cloudflare。
@@ -74,10 +92,12 @@ npx wrangler dev
 修改 `_worker.js` 或 `src/` 后需要重新运行 `npm run build`。提交前至少执行：
 
 ```bash
-npm run syntax
+npm run build
 npm test
-npm run deploy:dry
+node --check dist/worker.js
 ```
+
+`npm run deploy:dry` 仅在需要诊断 Wrangler 配置时手动执行，不是 Cloudflare Pages Git 集成的必需步骤。
 
 ## 5. Wrangler 基础配置
 
