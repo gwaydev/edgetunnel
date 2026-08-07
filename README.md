@@ -19,10 +19,10 @@
 
 当前保留的两个 fork 原始工作流只用于仓库维护：
 
-- `.github/workflows/sync.yml`：按原 fork 逻辑同步上游仓库；
-- `.github/workflows/Auto-close-empty-PRs.yml`：按原 fork 逻辑处理空内容或说明过短的 PR。
+- `.github/workflows/sync.yml`：仅在 Actions 页面手动触发上游同步；
+- `.github/workflows/Auto-close-empty-PRs.yml`：仅在 Actions 页面手动输入 PR 编号后，检查并关闭说明为空或过短的 PR。
 
-这两个工作流与 Pages 部署相互独立，删除或保留都不会改变 Pages 的自动部署机制。本轮已移除本项目新增的质量工作流，避免重复执行构建、测试和 Wrangler dry-run。
+这两个工作流都只保留 `workflow_dispatch` 手动入口，不会定时运行，也不会在新建 PR 时自动运行。它们与 Pages 部署相互独立，不会改变 Pages 的自动部署机制。
 
 Cloudflare Pages 推荐配置：
 

@@ -4,48 +4,63 @@ permissions:
   issues: write
   pull-requests: write
 
+# 仅允许手动触发；运行时必须填写要检查的 PR 编号。
 on:
-  pull_request_target:
-    # 只在新建、重新打开、草稿转正式时检查 PR 说明
-    types:
-      - opened
-      - reopened
-      - ready_for_review
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 要检查并在说明过短时关闭的 PR 编号
+        required: true
+        type: string
 
 jobs:
   check-pr:
-    name: Close PRs with empty or short descriptions
+    name: Close PR with empty or short description
     runs-on: ubuntu-latest
-    # 草稿 PR 先不处理，等作者准备好再检查
-    if: ${{ !github.event.pull_request.draft }}
 
     steps:
-      - name: Close PR when description is empty or too short
+      - name: Check and close selected PR
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ inputs.pr_number }}
         with:
           script: |
-            const pr = context.payload.pull_request;
+            const prNumber = Number(process.env.PR_NUMBER);
+            if (!Number.isSafeInteger(prNumber) || prNumber <= 0) {
+              core.setFailed('PR 编号必须是大于 0 的整数。');
+              return;
+            }
 
-            // 去掉空白和 HTML 注释，避免“看起来写了，实际上没写内容”
+            const { data: pr } = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: prNumber,
+            });
+
+            if (pr.draft) {
+              core.info(`PR #${prNumber} 仍是草稿，不执行关闭操作。`);
+              return;
+            }
+
+            // 去掉空白和 HTML 注释，避免“看起来写了，实际上没写内容”。
             const description = (pr.body || '')
               .replace(/<!--[\s\S]*?-->/g, ' ')
               .replace(/\s+/g, ' ')
               .trim();
 
             const descriptionLength = Array.from(description).length;
-            core.info(`Description length: ${descriptionLength}`);
+            core.info(`PR #${prNumber} description length: ${descriptionLength}`);
 
-            // 说明超过 8 个字符，就视为已经写了基本内容
+            // 说明超过 8 个字符，视为已经写了基本内容。
             if (descriptionLength > 8) {
               core.info('Description is long enough. No action needed.');
               return;
             }
 
-            // 说明为空或太短，先留言提醒，再自动关闭 PR
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: pr.number,
+              issue_number: prNumber,
               body: [
                 '🤖 这个 PR 因为说明为空，或说明过短，已被自动关闭。',
                 '',
@@ -56,6 +71,6 @@ jobs:
             await github.rest.pulls.update({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              pull_number: pr.number,
+              pull_number: prNumber,
               state: 'closed',
             });
