@@ -118,13 +118,13 @@ keep_vars = true             # 部署时保留控制台中已有的变量和 Sec
 
 ```bash
 # 按提示输入 VLESS UUID。
-npx wrangler secret put UUID
+npx wrangler pages secret put UUID --project-name edgt1
 
 # 可选：设置管理页面密码；未设置时程序会按现有兼容逻辑选择其他凭据。
-npx wrangler secret put ADMIN
+npx wrangler pages secret put ADMIN --project-name edgt1
 
 # 可选：覆盖默认加密密钥。
-npx wrangler secret put KEY
+npx wrangler pages secret put KEY --project-name edgt1
 ```
 
 个人模式下：
@@ -193,7 +193,25 @@ XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
 
 `XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
 
-### 7.5 流量与在线设备回传参数
+### 7.5 Xboard 快照写入入口
+
+生产模式提供固定入口：
+
+```text
+PUT /__xboard/snapshot
+Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>
+Content-Type: application/json
+```
+
+在 Cloudflare Pages 中把 `EDGETUNNEL_SYNC_TOKEN` 配置为 Secret，并在 Xboard/Hugging Face 中配置同值 Secret。入口只接受 `PUT`，请求体上限为 5 MiB；写入前会校验 schema v1，并在配置了 `XBOARD_NODE_ID` 时校验快照 `serverId`。成功后写入固定键 `xboard:snapshot`，不会在响应或日志中回显 Token、UUID 或完整快照。
+
+```bash
+npx wrangler pages secret put EDGETUNNEL_SYNC_TOKEN --project-name edgt1
+```
+
+不要把该 Secret 写入 `wrangler.toml` 或提交到 Git。
+
+### 7.6 流量与在线设备回传参数
 
 | 变量 | 是否必需 | 说明 |
 | --- | --- | --- |
@@ -211,7 +229,7 @@ Edgetunnel 只读取 Cloudflare 边缘注入的 `CF-Connecting-IP`，不会信�
 设置敏感令牌：
 
 ```bash
-npx wrangler secret put XBOARD_SERVER_TOKEN
+npx wrangler pages secret put XBOARD_SERVER_TOKEN --project-name edgt1
 ```
 
 完整的 Xboard 联合部署、快照协议、队列超时和生产验证步骤见 Xboard 仓库的 `docs/edgetunnel-xboard-deployment.md`。

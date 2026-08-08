@@ -1,5 +1,6 @@
 const XBOARD_UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const DEFAULT_CACHE_MS = 30 * 1000, DEFAULT_MAX_STALE_MS = 10 * 60 * 1000;
+const XBOARD_SNAPSHOT_KEY = 'xboard:snapshot', MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 let snapshotCache = null;
 
 export function normalizeXboardUuid(value) {
@@ -88,6 +89,115 @@ export function parseXboardSnapshot(text, now = Date.now()) {
 	};
 }
 
+export function clearXboardSnapshotCache() {
+	snapshotCache = null;
+}
+
+async function secureTokenEquals(actual, expected) {
+	const encoder = new TextEncoder();
+	const [actualDigest, expectedDigest] = await Promise.all([
+		crypto.subtle.digest('SHA-256', encoder.encode(actual)),
+		crypto.subtle.digest('SHA-256', encoder.encode(expected)),
+	]);
+	const actualBytes = new Uint8Array(actualDigest), expectedBytes = new Uint8Array(expectedDigest);
+	let difference = 0;
+	for (let index = 0; index < actualBytes.length; index++) difference |= actualBytes[index] ^ expectedBytes[index];
+	return difference === 0;
+}
+
+async function readLimitedRequestText(request, maxBytes = MAX_SNAPSHOT_BYTES) {
+	const declaredLength = Number(request.headers.get('content-length'));
+	if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new RangeError('Snapshot payload is too large');
+	if (!request.body) return '';
+
+	const reader = request.body.getReader(), chunks = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			const chunk = value instanceof Uint8Array ? value : new Uint8Array(value);
+			total += chunk.byteLength;
+			if (total > maxBytes) {
+				await reader.cancel();
+				throw new RangeError('Snapshot payload is too large');
+			}
+			chunks.push(chunk);
+		}
+	} finally {
+		try { reader.releaseLock() } catch (_) { }
+	}
+
+	const body = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		body.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return new TextDecoder().decode(body);
+}
+
+function snapshotUpdateResponse(status, message = '') {
+	if (status === 204) return new Response(null, { status });
+	return new Response(JSON.stringify({ error: message }), {
+		status,
+		headers: { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' },
+	});
+}
+
+export async function handleXboardSnapshotUpdate(request, env = {}) {
+	if (request.method !== 'PUT') {
+		const response = snapshotUpdateResponse(405, 'Method not allowed.');
+		response.headers.set('Allow', 'PUT');
+		return response;
+	}
+
+	const kv = env.XBOARD_KV;
+	const expectedToken = String(env.EDGETUNNEL_SYNC_TOKEN || '').trim();
+	if (!kv || typeof kv.put !== 'function' || !expectedToken) {
+		return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
+	}
+
+	const authorization = request.headers.get('Authorization') || '';
+	const match = authorization.match(/^Bearer\s+(.+)$/i);
+	const actualToken = match ? match[1].trim() : '';
+	if (!actualToken || !(await secureTokenEquals(actualToken, expectedToken))) {
+		return snapshotUpdateResponse(401, 'Unauthorized.');
+	}
+
+	let parsed;
+	try {
+		parsed = parseXboardSnapshot(await readLimitedRequestText(request));
+	} catch (error) {
+		return snapshotUpdateResponse(error instanceof RangeError ? 413 : 400, 'Invalid snapshot.');
+	}
+
+	const configuredServerId = String(env.XBOARD_NODE_ID ?? '').trim();
+	if (configuredServerId) {
+		const expectedServerId = Number(configuredServerId);
+		if (!Number.isSafeInteger(expectedServerId) || expectedServerId <= 0) {
+			return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
+		}
+		if (parsed.serverId !== expectedServerId) {
+			return snapshotUpdateResponse(400, 'Invalid snapshot.');
+		}
+	}
+
+	const canonicalSnapshot = JSON.stringify({
+		version: 1,
+		generatedAt: parsed.generatedAt,
+		serverId: parsed.serverId,
+		uuids: [...parsed.uuids],
+		userMap: parsed.userMap,
+	});
+	try {
+		await kv.put(XBOARD_SNAPSHOT_KEY, canonicalSnapshot);
+	} catch (_) {
+		return snapshotUpdateResponse(503, 'Snapshot update failed.');
+	}
+	clearXboardSnapshotCache();
+	return snapshotUpdateResponse(204);
+}
 function copyXboardAccessContext(source, overrides = {}) {
 	return {
 		...source,
@@ -153,5 +263,5 @@ export async function readXboardAccessContext(env = {}, now = Date.now(), force 
 	}
 }
 export function resetXboardSnapshotStateForTest() {
-	snapshotCache = null;
+	clearXboardSnapshotCache();
 }

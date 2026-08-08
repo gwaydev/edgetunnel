@@ -8,6 +8,8 @@ keep_vars = true
 # [vars]
 # XBOARD_KV_REQUIRED = "true"
 
+# Xboard 通过 PUT /__xboard/snapshot 发布快照时，还必须在 Pages 中配置 Secret EDGETUNNEL_SYNC_TOKEN。
+# Secret 不得写入此文件或提交到 Git。
 # Xboard 生产鉴权使用固定 binding 名称 XBOARD_KV。
 # 先创建或选择 KV namespace，再取消注释并替换下面的占位 ID。
 # 不要把真实 namespace ID、API Token 或账户信息提交到公开仓库。

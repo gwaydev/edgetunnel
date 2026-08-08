@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   parseXboardSnapshot,
+  handleXboardSnapshotUpdate,
   readXboardAccessContext,
   resetXboardSnapshotStateForTest,
 } from '../src/xboard-snapshot.js';
@@ -116,6 +117,68 @@ test('非法快照被拒绝，版本别名不会绕过协议校验', () => {
   })), /generatedAt/i);
 });
 
+test('快照同步入口要求正确 Bearer Token 和 KV 写绑定', async () => {
+  const writableKv = { async put() { throw new Error('must not write'); } };
+  const missingToken = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT', body: snapshot(),
+  }), { XBOARD_KV: writableKv, EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value' });
+  assert.equal(missingToken.status, 401);
+
+  const wrongToken = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT', headers: { Authorization: 'Bearer wrong-token' }, body: snapshot(),
+  }), { XBOARD_KV: writableKv, EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value' });
+  assert.equal(wrongToken.status, 401);
+
+  const missingBinding = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT', headers: { Authorization: 'Bearer sync-secret-value' }, body: snapshot(),
+  }), { EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value' });
+  assert.equal(missingBinding.status, 503);
+});
+
+test('快照同步入口拒绝非法快照和不匹配的节点 ID', async () => {
+  let writes = 0;
+  const env = {
+    EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value',
+    XBOARD_NODE_ID: '9',
+    XBOARD_KV: { async put() { writes++; } },
+  };
+  const headers = { Authorization: 'Bearer sync-secret-value' };
+
+  const invalid = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT', headers, body: '{"version":2}',
+  }), env);
+  assert.equal(invalid.status, 400);
+
+  const mismatch = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT', headers, body: snapshot([UUID_A], { [UUID_A]: 1 }, { serverId: 10 }),
+  }), env);
+  assert.equal(mismatch.status, 400);
+  assert.equal(writes, 0);
+});
+
+test('快照同步入口将规范化 schema v1 写入固定 KV 键', async () => {
+  const writes = [];
+  const response = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
+    method: 'PUT',
+    headers: { Authorization: 'Bearer sync-secret-value' },
+    body: snapshot([UUID_B, UUID_A], { [UUID_B]: 2, [UUID_A]: 1 }),
+  }), {
+    EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value',
+    XBOARD_NODE_ID: '9',
+    XBOARD_KV: { async put(key, value) { writes.push({ key, value }); } },
+  });
+
+  assert.equal(response.status, 204);
+  assert.equal(writes.length, 1);
+  assert.equal(writes[0].key, 'xboard:snapshot');
+  assert.deepEqual(JSON.parse(writes[0].value), {
+    version: 1,
+    generatedAt: '2026-08-01T00:00:00+00:00',
+    serverId: 9,
+    uuids: [UUID_A, UUID_B],
+    userMap: { [UUID_A]: 1, [UUID_B]: 2 },
+  });
+});
 test('生产强制模式缺失 XBOARD_KV 时 fail-closed', async () => {
   const result = await readXboardAccessContext({ XBOARD_KV_REQUIRED: 'true' }, 2_000);
 
