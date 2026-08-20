@@ -1,7 +1,13 @@
 const XBOARD_UUID_V4_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const DEFAULT_CACHE_MS = 30 * 1000, DEFAULT_MAX_STALE_MS = 10 * 60 * 1000;
-const XBOARD_SNAPSHOT_KEY = 'xboard:snapshot', MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
+const DEFAULT_CACHE_MS = 30 * 1000;
+const DEFAULT_MAX_STALE_MS = 10 * 60 * 1000;
+const DEFAULT_LEASE_TTL_SECONDS = 12 * 60 * 60;
+const DEFAULT_NEGATIVE_CACHE_MS = 30 * 1000;
+const MAX_CLOCK_SKEW_MS = 60 * 1000;
+const XBOARD_SNAPSHOT_KEY = 'xboard:snapshot';
+const MAX_SNAPSHOT_BYTES = 5 * 1024 * 1024;
 let snapshotCache = null;
+let negativeCache = null;
 
 export function normalizeXboardUuid(value) {
 	const uuid = String(value || '').trim().toLowerCase();
@@ -13,8 +19,8 @@ export function parseXboardUuidList(value) {
 	if (typeof value === 'string') {
 		const text = value.trim();
 		if (!text) return [];
-		try { values = JSON.parse(text) }
-		catch (_) { values = text.split(/[\s,]+/) }
+		try { values = JSON.parse(text); }
+		catch (_) { values = text.split(/[\s,]+/); }
 	}
 	if (!Array.isArray(values)) return [];
 	return [...new Set(values.map(normalizeXboardUuid).filter(Boolean))].sort();
@@ -23,8 +29,8 @@ export function parseXboardUuidList(value) {
 export function parseXboardUserMap(value, allowedUUIDs = null) {
 	let source = value;
 	if (typeof source === 'string') {
-		try { source = JSON.parse(source || '{}') }
-		catch (_) { return {} }
+		try { source = JSON.parse(source || '{}'); }
+		catch (_) { return {}; }
 	}
 	if (!source || typeof source !== 'object' || Array.isArray(source)) return {};
 	const result = {};
@@ -38,13 +44,28 @@ export function parseXboardUserMap(value, allowedUUIDs = null) {
 	return result;
 }
 
+function leaseTtlMs() {
+	return DEFAULT_LEASE_TTL_SECONDS * 1000;
+}
+
+function parseTimestamp(value, field) {
+	if (typeof value !== 'string' || !value.trim() || !Number.isFinite(Date.parse(value))) {
+		throw new Error(`Invalid Xboard snapshot ${field}`);
+	}
+	return Date.parse(value);
+}
+
 export function parseXboardSnapshot(text, now = Date.now()) {
 	const source = typeof text === 'string' ? JSON.parse(text) : text;
 	if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Invalid Xboard snapshot');
-	if (source.version !== 1) throw new Error('Invalid Xboard snapshot version');
-	if (typeof source.generatedAt !== 'string' || !source.generatedAt.trim() || !Number.isFinite(Date.parse(source.generatedAt))) {
-		throw new Error('Invalid Xboard snapshot generatedAt');
-	}
+	if (source.version !== 1 && source.version !== 2) throw new Error('Invalid Xboard snapshot version');
+	const generatedAtMs = parseTimestamp(source.generatedAt, 'generatedAt');
+	const leaseExpiresAtMs = source.version === 2
+		? parseTimestamp(source.leaseExpiresAt, 'leaseExpiresAt')
+		: generatedAtMs + leaseTtlMs();
+	if (leaseExpiresAtMs <= generatedAtMs) throw new Error('Invalid Xboard snapshot leaseExpiresAt');
+	if (leaseExpiresAtMs - generatedAtMs > leaseTtlMs() + MAX_CLOCK_SKEW_MS) throw new Error('Xboard snapshot lease is too long');
+	if (now >= leaseExpiresAtMs) throw new Error('Xboard snapshot lease expired');
 	if (source.serverId !== null && (!Number.isSafeInteger(source.serverId) || source.serverId <= 0)) {
 		throw new Error('Invalid Xboard snapshot serverId');
 	}
@@ -53,14 +74,12 @@ export function parseXboardSnapshot(text, now = Date.now()) {
 		throw new Error('Invalid Xboard snapshot userMap');
 	}
 
-	const normalizedUUIDs = [];
 	const uuidSet = new Set();
 	for (const rawUUID of source.uuids) {
 		const uuid = normalizeXboardUuid(rawUUID);
 		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot');
 		if (uuidSet.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot');
 		uuidSet.add(uuid);
-		normalizedUUIDs.push(uuid);
 	}
 
 	const normalizedUserMap = new Map();
@@ -68,8 +87,9 @@ export function parseXboardSnapshot(text, now = Date.now()) {
 		const uuid = normalizeXboardUuid(rawUUID);
 		if (!uuid) throw new Error('Invalid UUID in Xboard snapshot userMap');
 		if (normalizedUserMap.has(uuid)) throw new Error('Duplicate UUID in Xboard snapshot userMap');
-		if (!Number.isSafeInteger(rawUserID) || rawUserID <= 0) throw new Error('Invalid user ID in Xboard snapshot');
-		normalizedUserMap.set(uuid, rawUserID);
+		const userID = Number(rawUserID);
+		if (!Number.isSafeInteger(userID) || userID <= 0) throw new Error('Invalid user ID in Xboard snapshot');
+		normalizedUserMap.set(uuid, userID);
 	}
 	if (uuidSet.size !== normalizedUserMap.size || [...uuidSet].some(uuid => !normalizedUserMap.has(uuid))) {
 		throw new Error('Xboard snapshot uuids and userMap must contain the same UUID set');
@@ -78,8 +98,9 @@ export function parseXboardSnapshot(text, now = Date.now()) {
 	const uuidList = [...uuidSet].sort();
 	return {
 		mode: 'xboard',
-		version: 1,
+		version: source.version,
 		generatedAt: source.generatedAt,
+		leaseExpiresAt: new Date(leaseExpiresAtMs).toISOString(),
 		serverId: source.serverId,
 		uuids: new Set(uuidList),
 		userMap: Object.fromEntries(uuidList.map(uuid => [uuid, normalizedUserMap.get(uuid)])),
@@ -91,6 +112,7 @@ export function parseXboardSnapshot(text, now = Date.now()) {
 
 export function clearXboardSnapshotCache() {
 	snapshotCache = null;
+	negativeCache = null;
 }
 
 async function secureTokenEquals(actual, expected) {
@@ -109,7 +131,6 @@ async function readLimitedRequestText(request, maxBytes = MAX_SNAPSHOT_BYTES) {
 	const declaredLength = Number(request.headers.get('content-length'));
 	if (Number.isFinite(declaredLength) && declaredLength > maxBytes) throw new RangeError('Snapshot payload is too large');
 	if (!request.body) return '';
-
 	const reader = request.body.getReader(), chunks = [];
 	let total = 0;
 	try {
@@ -125,15 +146,11 @@ async function readLimitedRequestText(request, maxBytes = MAX_SNAPSHOT_BYTES) {
 			chunks.push(chunk);
 		}
 	} finally {
-		try { reader.releaseLock() } catch (_) { }
+		try { reader.releaseLock(); } catch (_) { }
 	}
-
 	const body = new Uint8Array(total);
 	let offset = 0;
-	for (const chunk of chunks) {
-		body.set(chunk, offset);
-		offset += chunk.byteLength;
-	}
+	for (const chunk of chunks) { body.set(chunk, offset); offset += chunk.byteLength; }
 	return new TextDecoder().decode(body);
 }
 
@@ -145,59 +162,54 @@ function snapshotUpdateResponse(status, message = '') {
 	});
 }
 
+function configuredLeaseTtlSeconds(env) {
+	const value = Number(env.XBOARD_LEASE_TTL_SECONDS ?? DEFAULT_LEASE_TTL_SECONDS);
+	return value === DEFAULT_LEASE_TTL_SECONDS ? value : DEFAULT_LEASE_TTL_SECONDS;
+}
+
 export async function handleXboardSnapshotUpdate(request, env = {}) {
 	if (request.method !== 'PUT') {
 		const response = snapshotUpdateResponse(405, 'Method not allowed.');
 		response.headers.set('Allow', 'PUT');
 		return response;
 	}
-
 	const kv = env.XBOARD_KV;
 	const expectedToken = String(env.EDGETUNNEL_SYNC_TOKEN || '').trim();
-	if (!kv || typeof kv.put !== 'function' || !expectedToken) {
-		return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
-	}
-
+	if (!kv || typeof kv.put !== 'function' || !expectedToken) return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
 	const authorization = request.headers.get('Authorization') || '';
 	const match = authorization.match(/^Bearer\s+(.+)$/i);
 	const actualToken = match ? match[1].trim() : '';
-	if (!actualToken || !(await secureTokenEquals(actualToken, expectedToken))) {
-		return snapshotUpdateResponse(401, 'Unauthorized.');
-	}
+	if (!actualToken || !(await secureTokenEquals(actualToken, expectedToken))) return snapshotUpdateResponse(401, 'Unauthorized.');
 
 	let parsed;
-	try {
-		parsed = parseXboardSnapshot(await readLimitedRequestText(request));
-	} catch (error) {
-		return snapshotUpdateResponse(error instanceof RangeError ? 413 : 400, 'Invalid snapshot.');
-	}
+	try { parsed = parseXboardSnapshot(await readLimitedRequestText(request), Date.now()); }
+	catch (error) { return snapshotUpdateResponse(error instanceof RangeError ? 413 : 400, 'Invalid snapshot.'); }
+	if (parsed.version !== 2) return snapshotUpdateResponse(400, 'Invalid snapshot.');
 
 	const configuredServerId = String(env.XBOARD_NODE_ID ?? '').trim();
 	if (configuredServerId) {
 		const expectedServerId = Number(configuredServerId);
-		if (!Number.isSafeInteger(expectedServerId) || expectedServerId <= 0) {
-			return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
-		}
-		if (parsed.serverId !== expectedServerId) {
-			return snapshotUpdateResponse(400, 'Invalid snapshot.');
-		}
+		if (!Number.isSafeInteger(expectedServerId) || expectedServerId <= 0) return snapshotUpdateResponse(503, 'Snapshot update is not configured.');
+		if (parsed.serverId !== expectedServerId) return snapshotUpdateResponse(400, 'Invalid snapshot.');
 	}
 
 	const canonicalSnapshot = JSON.stringify({
-		version: 1,
+		version: 2,
 		generatedAt: parsed.generatedAt,
+		leaseExpiresAt: parsed.leaseExpiresAt,
 		serverId: parsed.serverId,
 		uuids: [...parsed.uuids],
 		userMap: parsed.userMap,
 	});
 	try {
-		await kv.put(XBOARD_SNAPSHOT_KEY, canonicalSnapshot);
+		await kv.put(XBOARD_SNAPSHOT_KEY, canonicalSnapshot, { expirationTtl: configuredLeaseTtlSeconds(env) });
 	} catch (_) {
 		return snapshotUpdateResponse(503, 'Snapshot update failed.');
 	}
 	clearXboardSnapshotCache();
 	return snapshotUpdateResponse(204);
 }
+
 function copyXboardAccessContext(source, overrides = {}) {
 	return {
 		...source,
@@ -209,7 +221,7 @@ function copyXboardAccessContext(source, overrides = {}) {
 
 function createXboardFailClosedContext(now, error, stale = false) {
 	return {
-		mode: 'xboard', version: '', generatedAt: '', serverId: null, uuids: new Set(), userMap: {}, loadedAt: now,
+		mode: 'xboard', version: '', generatedAt: '', leaseExpiresAt: '', serverId: null, uuids: new Set(), userMap: {}, loadedAt: now,
 		stale, failClosed: true, error: error?.message || String(error),
 	};
 }
@@ -221,47 +233,60 @@ function isXboardKvRequired(value) {
 	return normalized === 'true' || normalized === '1';
 }
 
+function negativeCacheMs(env) {
+	const value = Number(env.XBOARD_NEGATIVE_CACHE_TTL_SECONDS ?? DEFAULT_NEGATIVE_CACHE_MS / 1000);
+	return (Number.isFinite(value) && value >= 0 ? value : DEFAULT_NEGATIVE_CACHE_MS / 1000) * 1000;
+}
+
+
+function failClosedFromNegative(now) {
+	return createXboardFailClosedContext(now, negativeCache?.error || new Error('Xboard snapshot unavailable.'), false);
+}
+
+function cachedSnapshotStillValid(cache, now) {
+	return cache && cache.leaseExpiresAt && now < Date.parse(cache.leaseExpiresAt);
+}
+
 export async function readXboardAccessContext(env = {}, now = Date.now(), force = false) {
 	const kv = env.XBOARD_KV;
 	if (!kv || typeof kv.get !== 'function') {
-		if (isXboardKvRequired(env.XBOARD_KV_REQUIRED)) {
-			return createXboardFailClosedContext(
-				now,
-				new Error('XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.'),
-				false,
-			);
-		}
-		return { mode: 'personal', version: '', generatedAt: '', serverId: null, uuids: null, userMap: {}, loadedAt: now, stale: false, failClosed: false };
+		if (isXboardKvRequired(env.XBOARD_KV_REQUIRED)) return createXboardFailClosedContext(now, new Error('XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.'), false);
+		return { mode: 'personal', version: '', generatedAt: '', leaseExpiresAt: '', serverId: null, uuids: null, userMap: {}, loadedAt: now, stale: false, failClosed: false };
 	}
-
 	const cacheMs = Math.max(0, Number(env.XBOARD_CACHE_TTL_SECONDS ?? 30) * 1000 || DEFAULT_CACHE_MS);
 	const maxStaleMs = Math.max(cacheMs, Number(env.XBOARD_MAX_STALE_SECONDS ?? 600) * 1000 || DEFAULT_MAX_STALE_MS);
+	if (negativeCache && now < negativeCache.until) return failClosedFromNegative(now);
+	if (negativeCache && now >= negativeCache.until) negativeCache = null;
 	if (!force && snapshotCache && now - snapshotCache.loadedAt < cacheMs) {
-		return copyXboardAccessContext(snapshotCache);
+		if (cachedSnapshotStillValid(snapshotCache, now)) return copyXboardAccessContext(snapshotCache);
+		const expired = new Error('Xboard snapshot lease expired');
+		negativeCache = { until: now + negativeCacheMs(env), error: expired, env };
+		return createXboardFailClosedContext(now, expired, false);
 	}
 
 	let snapshotText;
 	try {
-		snapshotText = await kv.get('xboard:snapshot');
+		snapshotText = await kv.get(XBOARD_SNAPSHOT_KEY);
 	} catch (error) {
-		if (snapshotCache && now - snapshotCache.loadedAt <= maxStaleMs) {
-			return copyXboardAccessContext(snapshotCache, { stale: true, error: error?.message || String(error) });
-		}
-		return createXboardFailClosedContext(now, error, true);
+		if (cachedSnapshotStillValid(snapshotCache, now) && now - snapshotCache.loadedAt <= maxStaleMs) return copyXboardAccessContext(snapshotCache, { stale: true, error: error?.message || String(error) });
+		const failed = createXboardFailClosedContext(now, error, true);
+		negativeCache = { until: now + negativeCacheMs(env), error, env };
+		return failed;
 	}
 
 	try {
-		if (snapshotText === null || snapshotText === undefined || (typeof snapshotText === 'string' && snapshotText.trim() === '')) {
-			throw new Error('Missing xboard:snapshot');
-		}
+		if (snapshotText === null || snapshotText === undefined || (typeof snapshotText === 'string' && snapshotText.trim() === '')) throw new Error('Missing xboard:snapshot');
 		const result = parseXboardSnapshot(snapshotText, now);
 		snapshotCache = result;
+		negativeCache = null;
 		return copyXboardAccessContext(result);
 	} catch (error) {
 		snapshotCache = null;
+		negativeCache = { until: now + negativeCacheMs(env), error, env };
 		return createXboardFailClosedContext(now, error, false);
 	}
 }
+
 export function resetXboardSnapshotStateForTest() {
 	clearXboardSnapshotCache();
 }

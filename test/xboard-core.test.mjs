@@ -1,4 +1,4 @@
-﻿import test from 'node:test';
+import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
@@ -39,8 +39,9 @@ function vlessHeader(uuid) {
 
 function snapshot(uuids = [UUID_A], userMap = { [UUID_A]: 1 }, overrides = {}) {
   return JSON.stringify({
-    version: 1,
-    generatedAt: '2026-08-01T00:00:00+00:00',
+    version: 2,
+    generatedAt: '2099-08-01T00:00:00+00:00',
+    leaseExpiresAt: '2099-08-01T12:00:00.000Z',
     serverId: 9,
     uuids,
     userMap,
@@ -98,12 +99,22 @@ test('正常解析 Xboard 快照并建立 UUID 到用户 ID 的映射', () => {
   assert.deepEqual([...result.uuids], [UUID_B]);
   assert.deepEqual(result.userMap, { [UUID_B]: 42 });
   assert.equal(result.failClosed, false);
+  assert.equal(result.version, 2);
+  assert.equal(result.leaseExpiresAt, '2099-08-01T12:00:00.000Z');
+});
+
+test('schema v2 拒绝超过 12 小时加 60 秒时钟偏差的租约', () => {
+  assert.throws(() => parseXboardSnapshot(snapshot([UUID_A], { [UUID_A]: 1 }, {
+    generatedAt: '2099-08-01T00:00:00.000Z',
+    leaseExpiresAt: '2099-08-01T12:01:01.000Z',
+  }), Date.parse('2099-08-01T00:00:00.000Z')), /too long/i);
 });
 
 test('非法快照被拒绝，版本别名不会绕过协议校验', () => {
   assert.throws(() => parseXboardSnapshot({
-    schemaVersion: 1,
-    generatedAt: '2026-08-01T00:00:00+00:00',
+    schemaversion: 2,
+    generatedAt: '2099-08-01T00:00:00+00:00',
+    leaseExpiresAt: '2099-08-01T12:00:00.000Z',
     serverId: 9,
     uuids: [UUID_A],
     userMap: { [UUID_A]: 1 },
@@ -156,7 +167,7 @@ test('快照同步入口拒绝非法快照和不匹配的节点 ID', async () =>
   assert.equal(writes, 0);
 });
 
-test('快照同步入口将规范化 schema v1 写入固定 KV 键', async () => {
+test('快照同步入口将规范化 schema v2 写入固定 KV 键', async () => {
   const writes = [];
   const response = await handleXboardSnapshotUpdate(new Request('https://worker.example/__xboard/snapshot', {
     method: 'PUT',
@@ -165,15 +176,18 @@ test('快照同步入口将规范化 schema v1 写入固定 KV 键', async () =>
   }), {
     EDGETUNNEL_SYNC_TOKEN: 'sync-secret-value',
     XBOARD_NODE_ID: '9',
-    XBOARD_KV: { async put(key, value) { writes.push({ key, value }); } },
+    XBOARD_LEASE_TTL_SECONDS: '999999',
+    XBOARD_KV: { async put(key, value, options) { writes.push({ key, value, options }); } },
   });
 
   assert.equal(response.status, 204);
   assert.equal(writes.length, 1);
   assert.equal(writes[0].key, 'xboard:snapshot');
+  assert.deepEqual(writes[0].options, { expirationTtl: 43200 });
   assert.deepEqual(JSON.parse(writes[0].value), {
-    version: 1,
-    generatedAt: '2026-08-01T00:00:00+00:00',
+    version: 2,
+    generatedAt: '2099-08-01T00:00:00+00:00',
+    leaseExpiresAt: '2099-08-01T12:00:00.000Z',
     serverId: 9,
     uuids: [UUID_A, UUID_B],
     userMap: { [UUID_A]: 1, [UUID_B]: 2 },
@@ -203,6 +217,24 @@ test('KV 读取异常时仅在有效旧快照未过期时回退', async () => {
   assert.deepEqual(failed.userMap, { [UUID_A]: 1 });
 });
 
+
+test('v1 快照兼容读取但按 12 小时租约到期', () => {
+  const generatedAt = '2026-08-01T00:00:00+00:00';
+  const result = parseXboardSnapshot(JSON.stringify({ version: 1, generatedAt, serverId: 9, uuids: [UUID_A], userMap: { [UUID_A]: 1 } }), Date.parse('2026-08-01T11:59:59Z'));
+  assert.equal(result.version, 1);
+  assert.equal(result.leaseExpiresAt, '2026-08-01T12:00:00.000Z');
+  assert.throws(() => parseXboardSnapshot(JSON.stringify({ version: 1, generatedAt, serverId: 9, uuids: [UUID_A], userMap: { [UUID_A]: 1 } }), Date.parse('2026-08-01T12:00:00Z')), /expired/i);
+});
+
+test('KV 缺失使用 30 秒负缓存且不会反复读取', async () => {
+  let reads = 0;
+  const binding = { async get() { reads++; return null; } };
+  const first = await readXboardAccessContext({ XBOARD_KV: binding, XBOARD_KV_REQUIRED: 'true' }, 1000, true);
+  const second = await readXboardAccessContext({ XBOARD_KV: binding, XBOARD_KV_REQUIRED: 'true' }, 2000, true);
+  assert.equal(first.failClosed, true);
+  assert.equal(second.failClosed, true);
+  assert.equal(reads, 1);
+});
 test('VLESS、WS early-data 和 XHTTP 首包均使用快照中的实际 UUID', async () => {
   const access = { mode: 'xboard', uuids: new Set([UUID_B]) };
   assert.equal(解析VLESSUUID(vlessHeader(UUID_B)), UUID_B);

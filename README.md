@@ -191,7 +191,7 @@ XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
 | `XBOARD_CACHE_TTL_SECONDS` | `30` | 正常 KV 快照在 Worker 内存中的短缓存时间 |
 | `XBOARD_MAX_STALE_SECONDS` | `600` | KV 读取异常时，已有有效快照允许继续使用的最长时间 |
 
-`XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
+`XBOARD_NEGATIVE_CACHE_TTL_SECONDS` 默认为 `30` 秒，用于快照缺失、损坏、过期或 KV 读取失败后的 fail-closed 负缓存，避免每次请求重复读取 KV。`XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
 
 ### 7.5 Xboard 快照写入入口
 
@@ -203,7 +203,7 @@ Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>
 Content-Type: application/json
 ```
 
-在 Cloudflare Pages 中把 `EDGETUNNEL_SYNC_TOKEN` 配置为 Secret，并在 Xboard/Hugging Face 中配置同值 Secret。入口只接受 `PUT`，请求体上限为 5 MiB；写入前会校验 schema v1，并在配置了 `XBOARD_NODE_ID` 时校验快照 `serverId`。成功后写入固定键 `xboard:snapshot`，不会在响应或日志中回显 Token、UUID 或完整快照。
+在 Cloudflare Pages 中把 `EDGETUNNEL_SYNC_TOKEN` 配置为 Secret，并在 Xboard/Hugging Face 中配置同值 Secret。入口只接受 `PUT`，请求体上限为 5 MiB；写入前会校验 schema v2（同时兼容读取旧 v1，但按 `generatedAt + 12 小时`计算租约），并在配置了 `XBOARD_NODE_ID` 时校验快照 `serverId`。成功后以 `expirationTtl=43200` 写入固定键 `xboard:snapshot`，不会在响应或日志中回显 Token、UUID 或完整快照。
 
 ```bash
 npx wrangler pages secret put EDGETUNNEL_SYNC_TOKEN --project-name edgt1
