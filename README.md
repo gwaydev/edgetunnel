@@ -1,6 +1,6 @@
 # Edgetunnel
 
-本仓库是面向 Cloudflare Workers 的 Edgetunnel 实现，并扩展了 Xboard 用户白名单与流量回传能力。本文档是本项目的主要运行说明，所有命令默认在仓库根目录执行。
+本仓库是面向 Cloudflare Workers 的 Edgetunnel 实现，并扩展了 Xboard 用户白名单与流量回传能力。本文档是本项目的主要运行说明，所有命令默认在仓库根目录执行。 
 
 ## 1. 运行模式
 
