@@ -93,17 +93,24 @@ function createTrafficHarness() {
 
 test.beforeEach(() => resetXboardSnapshotStateForTest());
 
-test('Xboard 自适应订阅同时支持 Bearer 和专用同步请求头', () => {
+test('Xboard 自适应订阅支持 Bearer、专用请求头和 JSON 请求体', async () => {
   const env = { EDGETUNNEL_SYNC_TOKEN: 'sync-secret' };
 
-  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+  assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
     headers: { Authorization: 'Bearer sync-secret' },
   }), env), true);
-  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+  assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
     headers: { 'X-EdgeTunnel-Sync-Token': 'sync-secret' },
   }), env), true);
-  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
-    headers: { Authorization: 'Bearer stale', 'X-EdgeTunnel-Sync-Token': 'stale' },
+  assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync_token: 'sync-secret' }),
+  }), env), true);
+  assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+    method: 'POST',
+    headers: { Authorization: 'Bearer stale', 'X-EdgeTunnel-Sync-Token': 'stale', 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync_token: 'stale' }),
   }), env), false);
 });
 
