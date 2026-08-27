@@ -15,6 +15,7 @@ import {
   是有效WS早期数据,
   读取XHTTP首包,
   创建Xboard流量记录器,
+  是EdgeTunnel订阅路径,
   校验Xboard订阅鉴权,
 } from '../_worker.js';
 
@@ -92,6 +93,13 @@ function createTrafficHarness() {
 }
 
 test.beforeEach(() => resetXboardSnapshotStateForTest());
+
+test('订阅路由接受末尾斜杠，避免被误送入 XHTTP', () => {
+  assert.equal(是EdgeTunnel订阅路径('/sub'), true);
+  assert.equal(是EdgeTunnel订阅路径('/sub/'), true);
+  assert.equal(是EdgeTunnel订阅路径('/SUB///'), true);
+  assert.equal(是EdgeTunnel订阅路径('/subscription'), false);
+});
 
 test('Xboard 自适应订阅支持 Bearer、专用请求头和 JSON 请求体', async () => {
   const env = { EDGETUNNEL_SYNC_TOKEN: 'sync-secret' };

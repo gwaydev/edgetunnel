@@ -125,6 +125,7 @@ export default {
 		}
 		const url = new URL(请求URL文本);
 		if (url.pathname === '/__xboard/snapshot') return handleXboardSnapshotUpdate(request, env);
+		const 是订阅路径 = 是EdgeTunnel订阅路径(url.pathname);
 		const UA = request.headers.get('User-Agent') || 'null';
 		const upgradeHeader = (request.headers.get('Upgrade') || '').toLowerCase(), contentType = (request.headers.get('content-type') || '').toLowerCase();
 		const 管理员密码 = env.ADMIN || env.admin || env.PASSWORD || env.password || env.pswd || env.TOKEN || env.KEY || env.UUID || env.uuid;
@@ -170,7 +171,7 @@ export default {
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
 			const accessContext = await 读取Xboard白名单(env);
 			return await 处理WS请求(request, userID, url, 反代上下文, accessContext, env, ctx);
-		} else if (管理员密码 && !访问路径.startsWith('admin/') && !['login', 'sub'].includes(访问路径) && request.method === 'POST') {// gRPC/XHTTP代理
+		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && !是订阅路径 && request.method === 'POST') {// gRPC/XHTTP代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			const referer = request.headers.get('Referer') || '';
 			const 命中XHTTP特征 = referer.includes('x_padding', 14) || referer.includes('x_padding=');
@@ -404,7 +405,7 @@ export default {
 					const 响应 = new Response('重定向中...', { status: 302, headers: { 'Location': '/login' } });
 					响应.headers.set('Set-Cookie', 'auth=; Path=/; Max-Age=0; HttpOnly');
 					return 响应;
-				} else if (访问路径 === 'sub') {//处理订阅请求
+				} else if (是订阅路径) {//处理订阅请求
 					const 订阅TOKEN = await MD5MD5(host + userID), 作为优选订阅生成器 = ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/' + 特征码字典[1] + '/edge');
 					const 请求TOKEN = url.searchParams.get('token');
 					const Xboard服务端请求订阅 = await 校验Xboard订阅鉴权(request, env);
@@ -6241,6 +6242,10 @@ async function html1101(host, 访问IP) {
 </html>`;
 }
 
+function 是EdgeTunnel订阅路径(pathname) {
+	return String(pathname || '').replace(/\/+$/, '').toLowerCase() === '/sub';
+}
+
 async function 校验Xboard订阅鉴权(request, env) {
 	const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
 	if (配置同步TOKEN === '') return false;
@@ -6262,6 +6267,7 @@ async function 校验Xboard订阅鉴权(request, env) {
 }
 
 export {
+	是EdgeTunnel订阅路径,
 	校验Xboard订阅鉴权,
 	解析Xboard快照,
 	读取Xboard白名单,
