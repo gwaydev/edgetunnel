@@ -170,7 +170,7 @@ export default {
 			log(`[WebSocket] 命中请求: ${url.pathname}${url.search}`);
 			const accessContext = await 读取Xboard白名单(env);
 			return await 处理WS请求(request, userID, url, 反代上下文, accessContext, env, ctx);
-		} else if (管理员密码 && !访问路径.startsWith('admin/') && 访问路径 !== 'login' && request.method === 'POST') {// gRPC/XHTTP代理
+		} else if (管理员密码 && !访问路径.startsWith('admin/') && !['login', 'sub'].includes(访问路径) && request.method === 'POST') {// gRPC/XHTTP代理
 			const 反代上下文 = await 反代参数获取(url, userID, 默认反代IP, 默认反代兜底);
 			const referer = request.headers.get('Referer') || '';
 			const 命中XHTTP特征 = referer.includes('x_padding', 14) || referer.includes('x_padding=');
