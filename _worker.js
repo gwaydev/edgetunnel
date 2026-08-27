@@ -408,7 +408,9 @@ export default {
 				} else if (是订阅路径) {//处理订阅请求
 					const 订阅TOKEN = await MD5MD5(host + userID), 作为优选订阅生成器 = ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/' + 特征码字典[1] + '/edge');
 					const 请求TOKEN = url.searchParams.get('token');
+					const Xboard服务端JSON订阅请求 = 是Xboard服务端JSON订阅请求(request, env);
 					const Xboard服务端请求订阅 = await 校验Xboard订阅鉴权(request, env);
+					if (Xboard服务端JSON订阅请求 && !Xboard服务端请求订阅) return 创建Xboard订阅鉴权拒绝响应();
 					const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN;
 					const 当前日序号 = Math.floor(Date.now() / 86400000);
 					const 订阅转换后端TOKEN种子 = base64SecretEncode(订阅TOKEN, userID);
@@ -428,6 +430,10 @@ export default {
 							"Profile-web-page-url": url.protocol + '//' + url.host + '/admin',
 							"Cache-Control": "no-store",
 						};
+						if (Xboard服务端JSON订阅请求) {
+							responseHeaders["X-EdgeTunnel-Subscription-Route"] = "v3";
+							responseHeaders["X-EdgeTunnel-Subscription-Auth"] = "accepted";
+						}
 						if (config_JSON.CF.Usage.success) {
 							const pagesSum = config_JSON.CF.Usage.pages;
 							const workersSum = config_JSON.CF.Usage.workers;
@@ -6246,6 +6252,25 @@ function 是EdgeTunnel订阅路径(pathname) {
 	return String(pathname || '').replace(/\/+$/, '').toLowerCase() === '/sub';
 }
 
+function 是Xboard服务端JSON订阅请求(request, env) {
+	const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
+	return 配置同步TOKEN !== ''
+		&& request.method === 'POST'
+		&& (request.headers.get('Content-Type') || '').toLowerCase().includes('application/json');
+}
+
+function 创建Xboard订阅鉴权拒绝响应() {
+	return new Response('Unauthorized', {
+		status: 401,
+		headers: {
+			'Content-Type': 'text/plain; charset=utf-8',
+			'Cache-Control': 'no-store',
+			'X-EdgeTunnel-Subscription-Route': 'v3',
+			'X-EdgeTunnel-Subscription-Auth': 'rejected',
+		},
+	});
+}
+
 async function 校验Xboard订阅鉴权(request, env) {
 	const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
 	if (配置同步TOKEN === '') return false;
@@ -6268,6 +6293,8 @@ async function 校验Xboard订阅鉴权(request, env) {
 
 export {
 	是EdgeTunnel订阅路径,
+	是Xboard服务端JSON订阅请求,
+	创建Xboard订阅鉴权拒绝响应,
 	校验Xboard订阅鉴权,
 	解析Xboard快照,
 	读取Xboard白名单,

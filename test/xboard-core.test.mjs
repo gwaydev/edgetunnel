@@ -16,6 +16,8 @@ import {
   读取XHTTP首包,
   创建Xboard流量记录器,
   是EdgeTunnel订阅路径,
+  是Xboard服务端JSON订阅请求,
+  创建Xboard订阅鉴权拒绝响应,
   校验Xboard订阅鉴权,
 } from '../_worker.js';
 
@@ -99,6 +101,25 @@ test('订阅路由接受末尾斜杠，避免被误送入 XHTTP', () => {
   assert.equal(是EdgeTunnel订阅路径('/sub/'), true);
   assert.equal(是EdgeTunnel订阅路径('/SUB///'), true);
   assert.equal(是EdgeTunnel订阅路径('/subscription'), false);
+});
+
+test('配置同步令牌时，未授权的 Xboard JSON 订阅会明确拒绝', async () => {
+  const env = { EDGETUNNEL_SYNC_TOKEN: 'sync-secret' };
+  const request = new Request('https://worker.example/sub', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sync_token: 'stale' }),
+  });
+
+  assert.equal(是Xboard服务端JSON订阅请求(request, env), true);
+  assert.equal(await 校验Xboard订阅鉴权(request, env), false);
+  const response = 创建Xboard订阅鉴权拒绝响应();
+  assert.equal(response.status, 401);
+  assert.equal(response.headers.get('X-EdgeTunnel-Subscription-Route'), 'v3');
+  assert.equal(response.headers.get('X-EdgeTunnel-Subscription-Auth'), 'rejected');
+  assert.equal(await response.text(), 'Unauthorized');
+
+  assert.equal(是Xboard服务端JSON订阅请求(new Request('https://worker.example/sub'), env), false);
 });
 
 test('Xboard 自适应订阅支持 Bearer、专用请求头和 JSON 请求体', async () => {
