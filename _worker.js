@@ -407,9 +407,7 @@ export default {
 				} else if (访问路径 === 'sub') {//处理订阅请求
 					const 订阅TOKEN = await MD5MD5(host + userID), 作为优选订阅生成器 = ['1', 'true'].includes(env.BEST_SUB) && url.searchParams.get('host') === 'example.com' && url.searchParams.get('uuid') === '00000000-0000-4000-8000-000000000000' && UA.toLowerCase().includes('tunnel (https://github.com/' + 特征码字典[1] + '/edge');
 					const 请求TOKEN = url.searchParams.get('token');
-					const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
-					const 请求授权 = request.headers.get('Authorization') || '';
-					const Xboard服务端请求订阅 = 配置同步TOKEN !== '' && 请求授权 === `Bearer ${配置同步TOKEN}`;
+					const Xboard服务端请求订阅 = 校验Xboard订阅鉴权(request, env);
 					const 用户客户端请求订阅 = 请求TOKEN === 订阅TOKEN;
 					const 当前日序号 = Math.floor(Date.now() / 86400000);
 					const 订阅转换后端TOKEN种子 = base64SecretEncode(订阅TOKEN, userID);
@@ -6243,7 +6241,18 @@ async function html1101(host, 访问IP) {
 </html>`;
 }
 
+function 校验Xboard订阅鉴权(request, env) {
+	const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
+	if (配置同步TOKEN === '') return false;
+
+	const 请求授权 = request.headers.get('Authorization') || '';
+	const 专用同步TOKEN = request.headers.get('X-EdgeTunnel-Sync-Token') || '';
+
+	return 请求授权 === `Bearer ${配置同步TOKEN}` || 专用同步TOKEN.trim() === 配置同步TOKEN;
+}
+
 export {
+	校验Xboard订阅鉴权,
 	解析Xboard快照,
 	读取Xboard白名单,
 	重置Xboard状态,

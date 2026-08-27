@@ -15,6 +15,7 @@ import {
   是有效WS早期数据,
   读取XHTTP首包,
   创建Xboard流量记录器,
+  校验Xboard订阅鉴权,
 } from '../_worker.js';
 
 const UUID_A = '11111111-1111-4111-8111-111111111111';
@@ -91,6 +92,20 @@ function createTrafficHarness() {
 }
 
 test.beforeEach(() => resetXboardSnapshotStateForTest());
+
+test('Xboard 自适应订阅同时支持 Bearer 和专用同步请求头', () => {
+  const env = { EDGETUNNEL_SYNC_TOKEN: 'sync-secret' };
+
+  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+    headers: { Authorization: 'Bearer sync-secret' },
+  }), env), true);
+  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+    headers: { 'X-EdgeTunnel-Sync-Token': 'sync-secret' },
+  }), env), true);
+  assert.equal(校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
+    headers: { Authorization: 'Bearer stale', 'X-EdgeTunnel-Sync-Token': 'stale' },
+  }), env), false);
+});
 
 test('正常解析 Xboard 快照并建立 UUID 到用户 ID 的映射', () => {
   const result = parseXboardSnapshot(snapshot([UUID_B], { [UUID_B]: 42 }), 1_000);

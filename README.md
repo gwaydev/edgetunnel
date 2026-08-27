@@ -211,7 +211,7 @@ npx wrangler pages secret put EDGETUNNEL_SYNC_TOKEN --project-name edgt1
 
 不要把该 Secret 写入 `wrangler.toml` 或提交到 Git。
 
-Xboard 的自适应订阅拉取也支持使用同一个 Secret 做服务端鉴权：Xboard 向目标的 `/sub` 地址发起请求时，会发送 `Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>`。Worker 优先接受该 Header，同时保留原有带 `token` 查询参数的个人客户端订阅鉴权；因此不要把同步 Secret 拼进订阅 URL，也不要记录到日志。多目标部署时，每个目标的 Xboard 配置必须使用对应 Worker 的同步 Secret。
+Xboard 的自适应订阅拉取也支持使用同一个 Secret 做服务端鉴权：Xboard 向目标的 `/sub` 地址发起请求时，会同时发送标准的 `Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>` 和专用的 `X-EdgeTunnel-Sync-Token: <EDGETUNNEL_SYNC_TOKEN>` 请求头。Worker 接受其中任意一个匹配值；专用请求头用于兼容会保留、覆盖或移除 `Authorization` 的托管出站代理。Worker 同时保留原有带 `token` 查询参数的个人客户端订阅鉴权；因此不要把同步 Secret 拼进订阅 URL，也不要记录到日志。多目标部署时，每个目标的 Xboard 配置必须使用对应 Worker 的同步 Secret。
 
 ### 7.6 流量与在线设备回传参数
 
