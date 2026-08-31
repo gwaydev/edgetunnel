@@ -19,3 +19,5 @@ keep_vars = true
 # 快照租约：12 小时有效；负缓存默认 30 秒。
 # XBOARD_LEASE_TTL_SECONDS = "43200"
 # XBOARD_NEGATIVE_CACHE_TTL_SECONDS = "30"
+# 已建立 Xboard 连接的授权复核间隔，默认 30 秒；运行时限制 5～300 秒。
+# XBOARD_ACCESS_REVALIDATION_INTERVAL_SECONDS = "30"

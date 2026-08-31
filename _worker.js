@@ -52,6 +52,68 @@ function 安排Xboard在线推送(env, ctx, userMap, force = false, accumulator 
 	return task;
 }
 
+function Xboard授权复核间隔毫秒(env = {}) {
+	const configured = env?.XBOARD_ACCESS_REVALIDATION_INTERVAL_SECONDS;
+	const parsed = configured === undefined ? 30 : Number(configured);
+	if (!Number.isFinite(parsed) || parsed <= 0) return 0;
+	return Math.min(300, Math.max(5, parsed)) * 1000;
+}
+
+/**
+ * Re-check an admitted Xboard UUID while the transport remains open.
+ * Subscription data is cached by clients, so authorization cannot stop at
+ * the initial handshake: a deleted user must also lose existing sessions.
+ */
+function 创建Xboard授权监视器(uuidValue, accessContext, env = {}, onRevoked = null, timerApi = globalThis) {
+	const uuid = 规范化XboardUUID(uuidValue);
+	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
+	const intervalMs = Xboard授权复核间隔毫秒(env);
+	const setTimer = typeof timerApi?.setTimeout === 'function' ? timerApi.setTimeout.bind(timerApi) : null;
+	const clearTimer = typeof timerApi?.clearTimeout === 'function' ? timerApi.clearTimeout.bind(timerApi) : null;
+	let timer = null;
+	let stopped = false;
+	let checking = false;
+
+	const stop = () => {
+		stopped = true;
+		if (timer !== null && clearTimer) clearTimer(timer);
+		timer = null;
+	};
+	const schedule = () => {
+		if (stopped || intervalMs <= 0 || !setTimer) return;
+		timer = setTimer(async () => {
+			timer = null;
+			if (stopped || checking) return;
+			checking = true;
+			try {
+				const current = await 读取Xboard白名单(env);
+				const authorized = current?.mode === 'xboard'
+					&& !current.failClosed
+					&& !current.stale
+					&& current.uuids instanceof Set
+					&& current.uuids.has(uuid);
+				if (!authorized) {
+					stop();
+					try { await onRevoked?.(); } catch (error) { log(`[Xboard授权] 关闭撤权连接失败: ${error?.message || error}`); }
+					return;
+				}
+			} catch (error) {
+				// Revalidation is security-sensitive: an unknown authorization state
+				// must not keep an old session alive.
+				stop();
+				try { await onRevoked?.(); } catch (closeError) { log(`[Xboard授权] 关闭无法复核连接失败: ${closeError?.message || closeError}`); }
+				return;
+			} finally {
+				checking = false;
+			}
+			schedule();
+		}, intervalMs);
+	};
+
+	schedule();
+	return { stop };
+}
+
 function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard流量累加器, request = null, onlineAccumulator = Xboard在线累加器, timerApi = globalThis) {
 	const uuid = 规范化XboardUUID(uuidValue);
 	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
@@ -656,7 +718,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 		try { reader.releaseLock() } catch (e) { }
 		return new Response('UDP is not supported', { status: 400 });
 	}
-	const Xboard流量记录器 = !首包.isUDP && 首包.协议 === 'vless'
+	const Xboard流量记录器 = 首包.协议 === 'vless'
 		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx, Xboard流量累加器, request)
 		: null;
 
@@ -668,6 +730,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 		'X-Accel-Buffering': 'no',
 		'Cache-Control': 'no-store'
 	});
+	let Xboard授权监视器 = null;
 
 	const 释放远端写入器 = () => {
 		if (远端写入器) {
@@ -719,6 +782,15 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 					try { controller.close() } catch (e) { }
 				}
 			};
+			const 关闭XHTTP连接 = () => {
+				try { remoteConnWrapper.socket?.close() } catch (e) { }
+				try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
+				try { reader.cancel() } catch (e) { }
+				try { xhttpBridge.close() } catch (e) { }
+			};
+			if (首包.协议 === 'vless' && accessContext?.mode === 'xboard') {
+				Xboard授权监视器 = 创建Xboard授权监视器(首包.uuid, accessContext, env, 关闭XHTTP连接);
+			}
 
 			const 上行写入队列 = XHTTP上行写入队列 = 创建上行写入队列({
 				获取写入器: 获取远端写入器,
@@ -781,6 +853,8 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 				log(`[XHTTP转发] 处理失败: ${err?.message || err}`);
 				closeSocketQuietly(xhttpBridge);
 			} finally {
+				Xboard授权监视器?.stop();
+				Xboard授权监视器 = null;
 				const 保持木马UDP反代下行 = !转发失败 && 首包.isUDP && 首包.协议 === 'trojan' && 木马UDP上下文.反代地址 && 木马UDP上下文.反代Socket;
 				上行写入队列.清空();
 				释放远端写入器();
@@ -790,6 +864,8 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 			}
 		},
 		cancel() {
+			Xboard授权监视器?.stop();
+			Xboard授权监视器 = null;
 			XHTTP上行写入队列?.清空();
 			try { remoteConnWrapper.socket?.close() } catch (e) { }
 			try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
@@ -980,6 +1056,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 	let 远端写入器 = null;
 	let GRPC上行写入队列 = null;
 	let Xboard流量记录器 = null;
+	let Xboard授权监视器 = null;
 	//log('[gRPC] 开始处理双向流');
 	const grpcHeaders = new Headers({
 		'Content-Type': 'application/grpc',
@@ -1089,6 +1166,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 				try { controller.close() } catch (e) { }
 			};
 
+
 			const 释放远端写入器 = () => {
 				if (远端写入器) {
 					try { 远端写入器.releaseLock() } catch (e) { }
@@ -1188,7 +1266,10 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID, accessContext);
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 								const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-								Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request) : null;
+							Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request);
+								if (Xboard流量记录器 && accessContext?.mode === 'xboard') {
+									Xboard授权监视器 = 创建Xboard授权监视器(uuid, accessContext, env, 关闭连接);
+								}
 								log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 								if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 								if (isUDP) {
@@ -1213,6 +1294,8 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 				转发失败 = true;
 				log(`[gRPC转发] 处理失败: ${err?.message || err}`);
 			} finally {
+				Xboard授权监视器?.stop();
+				Xboard授权监视器 = null;
 				Xboard流量记录器?.推送();
 				const 保持木马UDP反代下行 = !转发失败 && isDnsQuery && 判断是否是木马 && 木马UDP上下文.反代地址 && 木马UDP上下文.反代Socket;
 				if (保持木马UDP反代下行) {
@@ -1225,6 +1308,8 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 			}
 		},
 		cancel() {
+			Xboard授权监视器?.stop();
+			Xboard授权监视器 = null;
 			GRPC上行写入队列?.清空();
 			try { remoteConnWrapper.socket?.close() } catch (e) { }
 			try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
@@ -1293,6 +1378,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 	let WS显式队列字节 = 0, WS显式队列条目 = 0;
 	let 判断协议类型 = null, 当前写入Socket = null, 远端写入器 = null;
 	let Xboard流量记录器 = null;
+	let Xboard授权监视器 = null;
 	let ss上下文 = null, ss初始化任务 = null;
 
 	const 释放远端写入器 = () => {
@@ -1619,7 +1705,16 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 			const 解析结果 = 解析魏烈思请求(bytes, yourUUID, accessContext);
 			if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 			const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-			Xboard流量记录器 = !isUDP ? 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request) : null;
+			Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request);
+			if (Xboard流量记录器 && accessContext?.mode === 'xboard') {
+				Xboard授权监视器 = 创建Xboard授权监视器(uuid, accessContext, env, () => {
+					try { remoteConnWrapper.socket?.close() } catch (e) { }
+					try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
+					上行写入队列.清空();
+					closeSocketQuietly(serverSock);
+				});
+			}
+
 			if (isSpeedTestSite(hostname)) throw new Error('Speedtest site is blocked');
 			if (isUDP) {
 				if (port === 53) isDnsQuery = true;
@@ -1652,6 +1747,8 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 		try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
 		closeSocketQuietly(serverSock);
 		Xboard流量记录器?.推送();
+		Xboard授权监视器?.stop();
+		Xboard授权监视器 = null;
 	};
 
 	const 追加WS显式传输任务 = (任务) => {
@@ -1694,6 +1791,8 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 		入队WS显式传输(event.data);
 	});
 	serverSock.addEventListener('close', () => {
+		Xboard授权监视器?.stop();
+		Xboard授权监视器 = null;
 		closeSocketQuietly(serverSock);
 		收尾WS显式传输();
 		Xboard流量记录器?.推送();
@@ -6305,4 +6404,5 @@ export {
 	是有效WS早期数据,
 	读取XHTTP首包,
 	创建Xboard流量记录器,
+	创建Xboard授权监视器,
 };

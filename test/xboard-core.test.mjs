@@ -15,6 +15,7 @@ import {
   是有效WS早期数据,
   读取XHTTP首包,
   创建Xboard流量记录器,
+  创建Xboard授权监视器,
   是EdgeTunnel订阅路径,
   是Xboard服务端JSON订阅请求,
   创建Xboard订阅鉴权拒绝响应,
@@ -425,6 +426,39 @@ test('认证连接会按在线间隔刷新心跳，关闭时停止定时器', as
   await recorder.推送();
   await Promise.all(waits.splice(0));
   assert.deepEqual(cleared, [2]);
+});
+
+
+test('已建立连接会在 UUID 被撤权后停止并触发关闭', async () => {
+  const timers = [];
+  const cleared = [];
+  let snapshotText = snapshot([UUID_A], { [UUID_A]: 1 });
+  const env = {
+    XBOARD_KV_REQUIRED: 'true',
+    XBOARD_ACCESS_REVALIDATION_INTERVAL_SECONDS: '5',
+    XBOARD_KV: { async get() { return snapshotText; } },
+  };
+  const access = await readXboardAccessContext(env, Date.parse('2099-08-01T00:00:00Z'), true);
+  let revoked = 0;
+  const timerApi = {
+    setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
+    clearTimeout(id) { cleared.push(id); },
+  };
+  const monitor = 创建Xboard授权监视器(UUID_A, access, env, () => { revoked++; }, timerApi);
+
+  assert.ok(monitor);
+  assert.equal(timers[0].delay, 5_000);
+  snapshotText = snapshot([], {});
+  resetXboardSnapshotStateForTest();
+  await timers[0].callback();
+
+  assert.equal(revoked, 1);
+  assert.deepEqual(cleared, []);
+  assert.equal(timers.length, 1);
+});
+
+test('个人模式不会创建 Xboard 连接授权监视器', () => {
+  assert.equal(创建Xboard授权监视器(UUID_A, { mode: 'personal' }, {}, () => {}), null);
 });
 
 test('缺少 Xboard 回传配置时不发起外部请求', async () => {

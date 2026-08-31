@@ -193,6 +193,7 @@ XBOARD_KV binding is required when XBOARD_KV_REQUIRED is enabled.
 
 `XBOARD_NEGATIVE_CACHE_TTL_SECONDS` 默认为 `30` 秒，用于快照缺失、损坏、过期或 KV 读取失败后的 fail-closed 负缓存，避免每次请求重复读取 KV。`XBOARD_MAX_STALE_SECONDS` 只用于“KV 已正确绑定但读取发生异常”的情况，不会绕过 `XBOARD_KV_REQUIRED` 对缺失 binding 的检查。
 
+
 ### 7.5 Xboard 快照写入入口
 
 生产模式提供固定入口：
@@ -213,7 +214,15 @@ npx wrangler pages secret put EDGETUNNEL_SYNC_TOKEN --project-name edgt1
 
 Xboard 的自适应订阅拉取也支持使用同一个 Secret 做服务端鉴权：Xboard 向目标的 `/sub` 地址发起请求时，会同时发送标准的 `Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>` 和专用的 `X-EdgeTunnel-Sync-Token: <EDGETUNNEL_SYNC_TOKEN>` 请求头。Worker 接受其中任意一个匹配值；专用请求头用于兼容会保留、覆盖或移除 `Authorization` 的托管出站代理。Worker 同时保留原有带 `token` 查询参数的个人客户端订阅鉴权；因此不要把同步 Secret 拼进订阅 URL，也不要记录到日志。多目标部署时，每个目标的 Xboard 配置必须使用对应 Worker 的同步 Secret。
 
-### 7.6 流量与在线设备回传参数
+### 7.6 已建立连接的授权复核
+
+| 变量 | 默认值 | 说明 |
+| --- | ---: | --- |
+| `XBOARD_ACCESS_REVALIDATION_INTERVAL_SECONDS` | `30` | Xboard 模式下，已通过 UUID 鉴权的 WebSocket、gRPC、XHTTP 连接重新读取授权快照的间隔；运行时限制为 `5`～`300` 秒，设置为 `0` 可禁用（不建议生产环境禁用） |
+
+删除或禁用用户后，Xboard 会发布新的白名单快照；Edgetunnel 在下一次授权复核发现 UUID 不再存在时，会关闭该用户的现有连接。新连接仍会在首次握手时校验白名单。该机制是分布式环境下的有界撤权，不承诺绝对即时：实际生效时间还取决于队列执行、快照发布和 Cloudflare KV 传播。默认配置无需增加环境变量；只有需要调整复核间隔时，才在每个目标 Worker/Pages 项目的生产环境变量中设置该项。
+
+### 7.7 流量与在线设备回传参数
 
 | 变量 | 是否必需 | 说明 |
 | --- | --- | --- |
