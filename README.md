@@ -233,9 +233,9 @@ Xboard 的自适应订阅拉取也支持使用同一个 Secret 做服务端鉴�
 | `XBOARD_ONLINE_PUSH_INTERVAL_SECONDS` | 否 | 在线设备心跳间隔，默认 `60` 秒；运行时限制为 `1`～`240` 秒，`0` 仅用于显式禁用心跳/测试 |
 | `XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS` | 否 | 无主流量记录的保留时间 |
 
-Edgetunnel 只读取 Cloudflare 边缘注入的 `CF-Connecting-IP`，不会信任客户端可伪造的 `X-Forwarded-For`、`X-Real-IP` 或 `True-Client-IP`。通过 Xboard 快照认证的 VLESS 连接建立后会调用 `POST /api/v1/server/UniProxy/alive?merge=1`；`merge=1` 让多个 Worker isolate 的设备心跳在 Xboard 中合并，避免后一次上报覆盖其他实例看到的 IP。
+Edgetunnel 只读取 Cloudflare 边缘注入的 `CF-Connecting-IP`，不会信任客户端可伪造的 `X-Forwarded-For`、`X-Real-IP` 或 `True-Client-IP`。通过 Xboard 快照认证的 VLESS 连接会把在线 IP 与流量累加到同一个批次，并调用 `POST /api/v2/server/report?node_id=<NODE_ID>&token=<SERVER_TOKEN>`；请求体可同时包含 `traffic` 和 `alive`，从而避免同一周期分别调用 V1 `/push` 与 `/alive`。旧 V1 endpoint 仍保留在 Xboard 中，作为兼容和回滚路径，但当前 Worker 生产路径不再双写。
 
-连接保持期间即使没有新流量，也会按心跳间隔刷新在线状态，因此生产建议保持 `60` 秒，且不要超过运行时上限 `240` 秒。连接关闭时只停止本地心跳，不会绕过批处理间隔强制发送 alive；Xboard 会在最后一次心跳超过 300 秒后自动把设备判定为离线。`0` 会显式禁用周期心跳，仅适用于测试或临时排障，不建议生产使用。
+连接保持期间即使没有新流量，也会按心跳间隔刷新在线状态，因此生产建议保持 `60` 秒，且不要超过运行时上限 `240` 秒。连接关闭时会停止本地心跳，并以 force flush 尝试发送尾批次；Xboard 会在最后一次心跳超过 300 秒后自动把设备判定为离线。`0` 会显式禁用周期心跳，仅适用于测试或临时排障，不建议生产使用。
 
 设置敏感令牌：
 

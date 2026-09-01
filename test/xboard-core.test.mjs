@@ -7,8 +7,7 @@ import {
   readXboardAccessContext,
   resetXboardSnapshotStateForTest,
 } from '../src/xboard-snapshot.js';
-import { createTrafficAccumulator } from '../src/xboard-traffic.js';
-import { createOnlineAccumulator, readXboardClientIp } from '../src/xboard-online.js';
+import { readXboardClientIp } from '../src/xboard-online.js';
 import {
   解析VLESSUUID,
   解析魏烈思请求,
@@ -66,34 +65,6 @@ function kv(values, error = null) {
   };
 }
 
-function trafficEnv(overrides = {}) {
-  return {
-    XBOARD_API_BASE: 'https://xboard.example.com/',
-    XBOARD_NODE_ID: '9',
-    XBOARD_SERVER_TOKEN: 'secret',
-    XBOARD_TRAFFIC_PUSH_INTERVAL_SECONDS: '0',
-    ...overrides,
-  };
-}
-
-function createTrafficHarness() {
-  let activeFetch = async () => { throw new Error('missing test fetch'); };
-  let completionClock = Date.now;
-  const accumulator = createTrafficAccumulator({
-    fetchImpl: (...args) => activeFetch(...args),
-    log: () => {},
-    completionClock: () => completionClock(),
-  });
-  return {
-    add: accumulator.add,
-    snapshot: accumulator.snapshot,
-    push(env, userMap, now, fetchImpl = activeFetch, force = false, clock = Date.now) {
-      activeFetch = fetchImpl;
-      completionClock = clock;
-      return force ? accumulator.flush(env, userMap, now) : accumulator.push(env, userMap, now);
-    },
-  };
-}
 
 test.beforeEach(() => resetXboardSnapshotStateForTest());
 
@@ -304,127 +275,74 @@ test('VLESS、WS early-data 和 XHTTP 首包均使用快照中的实际 UUID', a
   assert.equal(firstPacket?.uuid, UUID_B);
 });
 
-test('流量记录器只接受已认证 UUID，并按 Xboard 用户聚合', async () => {
-  const traffic = createTrafficHarness();
+test('流量记录器只接受已认证 UUID，并把在线和流量加入同一累加器', async () => {
   const waits = [];
+  const calls = { alive: [], traffic: [], push: 0, flush: 0 };
+  const accumulator = {
+    addAlive(...args) { calls.alive.push(args); return true; },
+    addTraffic(...args) { calls.traffic.push(args); return true; },
+    async push() { calls.push++; return true; },
+    async flush() { calls.flush++; return true; },
+  };
   const ctx = { waitUntil(task) { waits.push(task); } };
   const access = { mode: 'xboard', uuids: new Set([UUID_B]), userMap: { [UUID_B]: 42 } };
-
-  assert.equal(创建Xboard流量记录器(UUID_A, access, {}, ctx), null);
-  const recorder = 创建Xboard流量记录器(UUID_B, access, {}, ctx, traffic);
-  recorder.上传(12);
-  recorder.下载(34);
-  await Promise.all(waits);
-  assert.deepEqual(traffic.snapshot(), { [UUID_B]: [12, 34] });
-});
-
-test('流量推送失败会回滚批次，成功后清空已发送缓存', async () => {
-  const traffic = createTrafficHarness();
-  traffic.add(UUID_A, 100, 200);
-  traffic.add(UUID_A, 50, 25);
-  const env = trafficEnv();
-  const userMap = { [UUID_A]: 7 };
-
-  await assert.rejects(traffic.push(env, userMap, 50_000, async () => new Response('failed', { status: 503 })), /503/);
-  assert.deepEqual(traffic.snapshot(), { [UUID_A]: [150, 225] });
-
-  const requests = [];
-  assert.equal(await traffic.push(env, userMap, 51_000, async (url, init) => {
-    requests.push({ url, init });
-    return new Response('{}', { status: 200 });
-  }), true);
-  assert.deepEqual(JSON.parse(requests[0].init.body), { 7: [150, 225] });
-  assert.deepEqual(traffic.snapshot(), {});
-});
-
-test('已撤权 UUID 的孤儿流量超过 TTL 后被清理且不会发送', async () => {
-  const traffic = createTrafficHarness();
-  traffic.add(UUID_A, 10, 20, 0);
-  let fetchCalls = 0;
-  const result = await traffic.push(
-    trafficEnv({ XBOARD_TRAFFIC_ORPHAN_TTL_SECONDS: '60' }),
-    {},
-    60_000,
-    async () => { fetchCalls++; return new Response('{}'); },
-    true,
-  );
-  assert.equal(result, false);
-  assert.equal(fetchCalls, 0);
-  assert.deepEqual(traffic.snapshot(), {});
-});
-
-test('在线上报只读取 CF-Connecting-IP，按用户去重并使用 merge=1', async () => {
-  const requests = [];
-  const online = createOnlineAccumulator({
-    fetchImpl: async (url, init) => {
-      requests.push({ url, init });
-      return new Response('{}', { status: 200 });
-    },
-  });
-  assert.equal(readXboardClientIp(new Request('https://worker.example', {
+  const request = new Request('https://worker.example', {
     headers: { 'CF-Connecting-IP': '203.0.113.7', 'X-Forwarded-For': '198.51.100.8' },
-  })), '203.0.113.7');
+  });
+
+  assert.equal(readXboardClientIp(request), '203.0.113.7');
   assert.equal(readXboardClientIp(new Request('https://worker.example', {
     headers: { 'X-Forwarded-For': '198.51.100.8' },
   })), '');
+  assert.equal(创建Xboard流量记录器(UUID_A, access, {}, ctx), null);
+  const recorder = 创建Xboard流量记录器(UUID_B, access, { XBOARD_ONLINE_PUSH_INTERVAL_SECONDS: '0' }, ctx, accumulator, request);
+  await Promise.all(waits.splice(0));
+  recorder.上传(12);
+  recorder.下载(34);
+  await Promise.all(waits.splice(0));
 
-  online.add(UUID_A, '203.0.113.7');
-  online.add(UUID_A, '203.0.113.7');
-  online.add(UUID_B, '198.51.100.8');
-  await online.flush(trafficEnv(), { [UUID_A]: 42, [UUID_B]: 42 }, 1_000);
-
-  const url = new URL(requests[0].url);
-  assert.equal(url.searchParams.get('merge'), '1');
-  assert.deepEqual(JSON.parse(requests[0].init.body), { 42: ['203.0.113.7', '198.51.100.8'] });
-  assert.deepEqual(online.snapshot(), {});
+  assert.deepEqual(calls.alive, [
+    [UUID_B, '203.0.113.7'],
+    [UUID_B, '203.0.113.7'],
+    [UUID_B, '203.0.113.7'],
+  ]);
+  assert.deepEqual(calls.traffic, [[UUID_B, 12, 0], [UUID_B, 0, 34]]);
+  assert.equal(calls.push, 3);
+  await recorder.推送();
+  assert.equal(calls.flush, 1);
 });
 
-test('在线上报失败会退避，强制刷新可重试且不丢设备', async () => {
-  let calls = 0;
-  const online = createOnlineAccumulator({
-    fetchImpl: async () => {
-      calls++;
-      return calls === 1 ? new Response('failed', { status: 503 }) : new Response('{}', { status: 200 });
-    },
-  });
-  online.add(UUID_A, '203.0.113.7');
-  await assert.rejects(online.flush(trafficEnv(), { [UUID_A]: 42 }, 1_000), /503/);
-  assert.deepEqual(online.snapshot(), { [UUID_A]: ['203.0.113.7'] });
-  assert.equal(await online.push(trafficEnv(), { [UUID_A]: 42 }, 1_500), false);
-  assert.equal(calls, 1);
-  assert.equal(await online.flush(trafficEnv(), { [UUID_A]: 42 }, 1_500), true);
-  assert.equal(calls, 2);
-});
-
-test('认证连接会按在线间隔刷新心跳，关闭时停止定时器', async () => {
+test('认证连接会按在线间隔刷新心跳，关闭时仅强制刷新一次并停止定时器', async () => {
   const waits = [];
   const timers = [];
   const cleared = [];
-  const onlineCalls = { add: 0, push: 0, flush: 0 };
-  const online = {
-    add() { onlineCalls.add++; },
-    async push() { onlineCalls.push++; },
-    async flush() { onlineCalls.flush++; },
+  const calls = { alive: 0, traffic: 0, push: 0, flush: 0 };
+  const accumulator = {
+    addAlive() { calls.alive++; return true; },
+    addTraffic() { calls.traffic++; return true; },
+    async push() { calls.push++; return true; },
+    async flush() { calls.flush++; return true; },
   };
-  const traffic = { add() {}, push: async () => false, flush: async () => false };
   const timerApi = {
     setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
     clearTimeout(id) { cleared.push(id); },
   };
-  const env = { ...trafficEnv(), XBOARD_ONLINE_PUSH_INTERVAL_SECONDS: '60' };
+  const env = { XBOARD_ONLINE_PUSH_INTERVAL_SECONDS: '60' };
   const access = { mode: 'xboard', uuids: new Set([UUID_B]), userMap: { [UUID_B]: 42 } };
   const ctx = { waitUntil(task) { waits.push(task); } };
-  const recorder = 创建Xboard流量记录器(UUID_B, access, env, ctx, traffic,
-    new Request('https://worker.example', { headers: { 'CF-Connecting-IP': '203.0.113.7' } }), online, timerApi);
+  const recorder = 创建Xboard流量记录器(UUID_B, access, env, ctx, accumulator,
+    new Request('https://worker.example', { headers: { 'CF-Connecting-IP': '203.0.113.7' } }), timerApi);
 
   await Promise.all(waits.splice(0));
-  assert.equal(onlineCalls.add, 1);
+  assert.equal(calls.alive, 1);
   assert.equal(timers[0].delay, 60_000);
   await timers[0].callback();
   await Promise.all(waits.splice(0));
-  assert.equal(onlineCalls.add, 2);
+  assert.equal(calls.alive, 2);
+  assert.equal(calls.push, 2);
   await recorder.推送();
   await Promise.all(waits.splice(0));
+  assert.equal(calls.flush, 1);
   assert.deepEqual(cleared, [2]);
 });
 
@@ -459,12 +377,4 @@ test('已建立连接会在 UUID 被撤权后停止并触发关闭', async () =>
 
 test('个人模式不会创建 Xboard 连接授权监视器', () => {
   assert.equal(创建Xboard授权监视器(UUID_A, { mode: 'personal' }, {}, () => {}), null);
-});
-
-test('缺少 Xboard 回传配置时不发起外部请求', async () => {
-  let calls = 0;
-  const online = createOnlineAccumulator({ fetchImpl: async () => { calls++; return new Response('{}'); } });
-  online.add(UUID_A, '203.0.113.7');
-  assert.equal(await online.flush({}, { [UUID_A]: 42 }, 1_000), false);
-  assert.equal(calls, 0);
 });

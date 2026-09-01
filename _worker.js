@@ -5,8 +5,8 @@ import {
 	resetXboardSnapshotStateForTest,
 	handleXboardSnapshotUpdate,
 } from './src/xboard-snapshot.js';
-import { createTrafficAccumulator } from './src/xboard-traffic.js';
-import { createOnlineAccumulator, readXboardClientIp } from './src/xboard-online.js';
+import { createXboardReportAccumulator } from './src/xboard-report.js';
+import { readXboardClientIp } from './src/xboard-online.js';
 
 const Version = '2026-07-11 19:02:35';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
@@ -30,24 +30,14 @@ function 校验VLESSUUID(data, fallbackUUID, accessContext = null) {
 	return accessContext.uuids instanceof Set && accessContext.uuids.has(uuid) ? uuid : null;
 }
 
-const Xboard流量累加器 = createTrafficAccumulator({
+const Xboard上报累加器 = createXboardReportAccumulator({
 	fetchImpl: (...args) => fetch(...args),
 	log,
 });
-const Xboard在线累加器 = createOnlineAccumulator({
-	fetchImpl: (...args) => fetch(...args),
-});
 
-function 安排Xboard流量推送(env, ctx, userMap, force = false, accumulator = Xboard流量累加器) {
+function 安排Xboard上报(env, ctx, userMap, force = false, accumulator = Xboard上报累加器) {
 	const task = (force ? accumulator.flush(env, userMap, Date.now()) : accumulator.push(env, userMap, Date.now()))
-		.catch(error => log(`[Xboard流量] 推送失败: ${error?.message || error}`));
-	if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
-	return task;
-}
-
-function 安排Xboard在线推送(env, ctx, userMap, force = false, accumulator = Xboard在线累加器) {
-	const task = (force ? accumulator.flush(env, userMap, Date.now()) : accumulator.push(env, userMap, Date.now()))
-		.catch(error => log(`[Xboard在线] 上报失败: ${error?.message || error}`));
+		.catch(error => log(`[Xboard上报] 推送失败: ${error?.message || error}`));
 	if (ctx && typeof ctx.waitUntil === 'function') ctx.waitUntil(task);
 	return task;
 }
@@ -114,7 +104,7 @@ function 创建Xboard授权监视器(uuidValue, accessContext, env = {}, onRevok
 	return { stop };
 }
 
-function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard流量累加器, request = null, onlineAccumulator = Xboard在线累加器, timerApi = globalThis) {
+function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumulator = Xboard上报累加器, request = null, timerApi = globalThis) {
 	const uuid = 规范化XboardUUID(uuidValue);
 	if (!uuid || accessContext?.mode !== 'xboard' || !(accessContext.uuids instanceof Set) || !accessContext.uuids.has(uuid)) return null;
 	const userMap = accessContext.userMap || {};
@@ -130,8 +120,8 @@ function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumul
 	let stopped = false;
 	let stopPromise = null;
 	const 记录在线 = () => {
-		if (stopped || !clientIp || !onlineAccumulator.add(uuid, clientIp)) return Promise.resolve(false);
-		return 安排Xboard在线推送(env, ctx, userMap, false, onlineAccumulator);
+		if (stopped || !clientIp || !accumulator.addAlive(uuid, clientIp)) return Promise.resolve(false);
+		return 安排Xboard上报(env, ctx, userMap, false, accumulator);
 	};
 	const 安排在线心跳 = () => {
 		if (stopped || !clientIp || heartbeatIntervalMs <= 0 || !setTimer) return;
@@ -145,9 +135,10 @@ function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumul
 	记录在线();
 	安排在线心跳();
 	const 记录 = (upload, download) => {
-		accumulator.add(uuid, upload, download);
-		安排Xboard流量推送(env, ctx, userMap, false, accumulator);
-		记录在线();
+		if (stopped) return;
+		accumulator.addAlive(uuid, clientIp);
+		accumulator.addTraffic(uuid, upload, download);
+		安排Xboard上报(env, ctx, userMap, false, accumulator);
 	};
 	return {
 		上传(bytes) { 记录(bytes, 0) },
@@ -157,10 +148,7 @@ function 创建Xboard流量记录器(uuidValue, accessContext, env, ctx, accumul
 			stopped = true;
 			if (heartbeatTimer !== null && clearTimer) clearTimer(heartbeatTimer);
 			heartbeatTimer = null;
-			stopPromise = Promise.all([
-				安排Xboard流量推送(env, ctx, userMap, true, accumulator),
-				安排Xboard在线推送(env, ctx, userMap, false, onlineAccumulator),
-			]);
+			stopPromise = 安排Xboard上报(env, ctx, userMap, true, accumulator);
 			return stopPromise;
 		},
 	};
@@ -719,7 +707,7 @@ async function 处理XHTTP请求(request, yourUUID, 反代上下文 = {}, access
 		return new Response('UDP is not supported', { status: 400 });
 	}
 	const Xboard流量记录器 = 首包.协议 === 'vless'
-		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx, Xboard流量累加器, request)
+		? 创建Xboard流量记录器(首包.uuid, accessContext, env, ctx, Xboard上报累加器, request)
 		: null;
 
 	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null };
@@ -1266,7 +1254,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}, accessC
 								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID, accessContext);
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 								const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-							Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request);
+							Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard上报累加器, request);
 								if (Xboard流量记录器 && accessContext?.mode === 'xboard') {
 									Xboard授权监视器 = 创建Xboard授权监视器(uuid, accessContext, env, 关闭连接);
 								}
@@ -1705,7 +1693,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}, acce
 			const 解析结果 = 解析魏烈思请求(bytes, yourUUID, accessContext);
 			if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
 			const { port, hostname, version, isUDP, rawClientData, uuid } = 解析结果;
-			Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard流量累加器, request);
+			Xboard流量记录器 = 创建Xboard流量记录器(uuid, accessContext, env, ctx, Xboard上报累加器, request);
 			if (Xboard流量记录器 && accessContext?.mode === 'xboard') {
 				Xboard授权监视器 = 创建Xboard授权监视器(uuid, accessContext, env, () => {
 					try { remoteConnWrapper.socket?.close() } catch (e) { }
