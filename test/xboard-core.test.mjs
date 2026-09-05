@@ -8,6 +8,7 @@ import {
   resetXboardSnapshotStateForTest,
 } from '../src/xboard-snapshot.js';
 import { readXboardClientIp } from '../src/xboard-online.js';
+import worker from '../_worker.js';
 import {
   解析VLESSUUID,
   解析魏烈思请求,
@@ -68,11 +69,94 @@ function kv(values, error = null) {
 
 test.beforeEach(() => resetXboardSnapshotStateForTest());
 
+async function withWorkerRuntimeStubs(callback) {
+  const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const originalFetch = globalThis.fetch;
+  const pendingTasks = [];
+
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    value: { subtle: { digest: async () => new Uint8Array(16).buffer } },
+  });
+  globalThis.fetch = async () => new Response('', { status: 200 });
+
+  try {
+    return await callback({
+      waitUntil(task) {
+        pendingTasks.push(Promise.resolve(task));
+      },
+      async flush() {
+        await Promise.allSettled(pendingTasks);
+      },
+    });
+  } finally {
+    await Promise.allSettled(pendingTasks);
+    globalThis.fetch = originalFetch;
+    if (originalCryptoDescriptor) {
+      Object.defineProperty(globalThis, 'crypto', originalCryptoDescriptor);
+    } else {
+      delete globalThis.crypto;
+    }
+  }
+}
+
+function workerRequest(url, init = {}) {
+  const request = new Request(url, init);
+  Object.defineProperty(request, 'cf', { value: { colo: 'SFO', asn: 13335 } });
+  return request;
+}
+
 test('订阅路由接受末尾斜杠，避免被误送入 XHTTP', () => {
   assert.equal(是EdgeTunnel订阅路径('/sub'), true);
   assert.equal(是EdgeTunnel订阅路径('/sub/'), true);
   assert.equal(是EdgeTunnel订阅路径('/SUB///'), true);
   assert.equal(是EdgeTunnel订阅路径('/subscription'), false);
+});
+
+test('强制 Xboard KV 模式无 ADMIN 时，服务端订阅可用且普通请求仍拒绝', async () => {
+  await withWorkerRuntimeStubs(async ({ waitUntil, flush }) => {
+    const values = new Map();
+    const kvBinding = {
+      async get(key) {
+        return values.get(key) ?? null;
+      },
+      async put(key, value) {
+        values.set(key, value);
+      },
+    };
+    const env = {
+      XBOARD_KV_REQUIRED: 'true',
+      XBOARD_KV: kvBinding,
+      EDGETUNNEL_SYNC_TOKEN: 'sync-secret',
+    };
+
+    const accepted = await worker.fetch(workerRequest('https://worker.example/sub?target=clash', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer sync-secret',
+        'User-Agent': 'Xboard-EdgeTunnel-Subscription/1.0',
+      },
+      body: JSON.stringify({ sync_token: 'sync-secret' }),
+    }), env, { waitUntil });
+    assert.equal(accepted.status, 200);
+    assert.equal(accepted.headers.get('X-EdgeTunnel-Subscription-Route'), 'v3');
+    assert.equal(accepted.headers.get('X-EdgeTunnel-Subscription-Auth'), 'accepted');
+    assert.notEqual((await accepted.text()).trim(), 'noADMIN');
+
+    const rejected = await worker.fetch(workerRequest('https://worker.example/sub?target=clash', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sync_token: 'wrong-secret' }),
+    }), env, { waitUntil });
+    assert.equal(rejected.status, 401);
+    assert.equal(rejected.headers.get('X-EdgeTunnel-Subscription-Auth'), 'rejected');
+
+    const ordinary = await worker.fetch(workerRequest('https://worker.example/sub'), env, { waitUntil });
+    assert.equal(ordinary.status, 404);
+
+    await flush();
+  });
 });
 
 test('配置同步令牌时，未授权的 Xboard JSON 订阅会明确拒绝', async () => {
