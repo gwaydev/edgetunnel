@@ -7,3 +7,5 @@ compatibility_date = "2025-11-04"
 # [[kv_namespaces]]
 # binding = "XBOARD_KV"
 # id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Git deployments must run npm run build:pages and publish dist-pages.
