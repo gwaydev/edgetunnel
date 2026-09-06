@@ -1,6 +1,0 @@
-name = "v20251104"
-main = "dist/worker.js"
-compatibility_date = "2025-11-04"
-keep_vars = true
-
-# Worker-compatible local dry-run config. Production edgt1 is a Pages project.
