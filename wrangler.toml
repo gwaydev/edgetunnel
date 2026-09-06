@@ -1,5 +1,6 @@
 name = "v20251104"
 main = "dist/worker.js"
+pages_build_output_dir = "dist-pages"
 compatibility_date = "2025-11-04"
 keep_vars = true
 
