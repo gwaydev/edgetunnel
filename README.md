@@ -17,6 +17,10 @@
 
 本项目不使用 GitHub Actions 进行构建或部署。推送到 GitHub 后，由 Cloudflare Pages 的 GitHub 集成负责拉取仓库、执行构建并发布；因此不要为部署额外配置 GitHub Actions Secrets。
 
+> **生产配置来源约定：** 当前生产 Pages 项目的 KV binding、Variables 和 Secrets 统一由 Cloudflare 控制台维护，`wrangler.toml` 不声明生产 `XBOARD_KV` binding，也不保存生产 namespace ID、Token 或其他敏感值。仓库中的配置文件只负责构建入口和本地/诊断配置；不要通过提交配置文件来覆盖控制台中的生产绑定。
+
+Cloudflare Pages 与 HF Space 是两个独立的运行环境：Pages 只配置 Worker 运行和回传所需的少量变量；Xboard、数据库、Redis、套餐、用户及多目标同步变量属于 HF Space，不会自动出现在 Pages 的变量列表中。
+
 当前保留的两个 fork 原始工作流只用于仓库维护：
 
 - `.github/workflows/sync.yml`：仅在 Actions 页面手动触发上游同步；
@@ -99,9 +103,15 @@ node --check dist/worker.js
 
 `npm run deploy:dry` 仅在需要诊断 Wrangler 配置时手动执行，不是 Cloudflare Pages Git 集成的必需步骤。
 
-## 5. Wrangler 基础配置
+## 5. Wrangler 基础配置（本地/独立 Worker 诊断）
 
-主配置文件是 `wrangler.toml`：
+本仓库保留 `wrangler.toml` 主要用于本地构建、诊断和独立 Worker 场景：
+
+- 当前生产 Pages 的 `XBOARD_KV` binding、Variables 和 Secrets 不由该文件声明；
+- Pages 生产配置以 Cloudflare 控制台为唯一来源；
+- 不要把 namespace ID、Secret、Token 或 UUID 写回该文件。
+
+配置文件示例：
 
 ```toml
 name = "v20251104"          # Cloudflare Worker 名称，可按环境修改
@@ -112,9 +122,9 @@ keep_vars = true             # 部署时保留控制台中已有的变量和 Sec
 
 修改 `name` 后应先确认没有覆盖错误的 Worker。`compatibility_date` 的升级需要单独测试，不要在普通文档或配置整理中顺手更新。
 
-## 6. 个人 UUID 模式配置
+## 6. 个人 UUID 模式配置（独立 Worker/本地）
 
-最小配置是 `UUID`。敏感值建议使用 Wrangler Secret，不要直接写入 `wrangler.toml`：
+最小配置是 `UUID`。如果部署的是独立 Worker，可使用 Wrangler Secret；如果部署的是 Cloudflare Pages，则必须在 Pages 控制台的 Variables and Secrets 中手动配置，不要把生产 Secret 写入 `wrangler.toml`：
 
 ```bash
 # 按提示输入 VLESS UUID。
@@ -137,27 +147,23 @@ npx wrangler pages secret put KEY --project-name edgt1
 
 ### 7.1 创建 Cloudflare KV namespace
 
+可以使用 Cloudflare 控制台创建 KV namespace，也可以使用 Wrangler 命令创建资源：
+
 ```bash
-# 创建用于保存 Xboard 白名单快照的 KV namespace。
 npx wrangler kv namespace create XBOARD_KV
 ```
 
-命令会返回 namespace ID。将它写入本地或私有部署配置，不要把真实 ID、API Token 或账户信息提交到公开仓库。
+命令返回的 namespace ID 只用于在 Cloudflare Pages 控制台选择正确的 namespace；不要把真实 ID、API Token 或账户信息提交到公开仓库。
 
-### 7.2 配置绑定和生产防护
+### 7.2 在 Cloudflare Pages 控制台配置绑定和生产防护
 
-在 `wrangler.toml` 中启用：
+当前生产项目不通过 `wrangler.toml` 管理 binding。请在 Cloudflare 控制台进入 **Workers & Pages → edgt1 → Settings**，分别在 Production 和 Preview 配置：
 
-```toml
-[vars]
-# 启用后，如果 XBOARD_KV 缺失或不是有效 KV binding，Worker 将显式失败。
-XBOARD_KV_REQUIRED = "true"
+1. **Settings → Bindings**：添加 KV binding，Binding name 必须是 `XBOARD_KV`，namespace 选择 Xboard 写入快照所使用的同一个 namespace。
+2. **Settings → Variables and Secrets → Variables**：添加 `XBOARD_KV_REQUIRED=true`。
+3. 保存后重新部署或等待下一次 Git 自动部署，再进行线上验证。
 
-[[kv_namespaces]]
-# binding 名称必须固定为 XBOARD_KV，不能自行改名。
-binding = "XBOARD_KV"
-id = "替换为实际的_KV_NAMESPACE_ID"
-```
+`wrangler.toml` 中没有生产 `[[kv_namespaces]]` 段，这是有意设计：生产绑定由控制台维护，避免 Git 提交或部署流程覆盖你的手动配置。
 
 `XBOARD_KV_REQUIRED` 以下值会被识别为开启：
 
@@ -204,13 +210,9 @@ Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>
 Content-Type: application/json
 ```
 
-在 Cloudflare Pages 中把 `EDGETUNNEL_SYNC_TOKEN` 配置为 Secret，并在 Xboard/Hugging Face 中配置同值 Secret。入口只接受 `PUT`，请求体上限为 5 MiB；写入前会校验 schema v2（同时兼容读取旧 v1，但按 `generatedAt + 12 小时`计算租约），并在配置了 `XBOARD_NODE_ID` 时校验快照 `serverId`。成功后以 `expirationTtl=43200` 写入固定键 `xboard:snapshot`，不会在响应或日志中回显 Token、UUID 或完整快照。
+在 Cloudflare Pages 控制台的 **Settings → Variables and Secrets → Secrets** 中手动配置 `EDGETUNNEL_SYNC_TOKEN`，并在 Xboard/Hugging Face 中配置同值 Secret。入口只接受 `PUT`，请求体上限为 5 MiB；写入前会校验 schema v2（同时兼容读取旧 v1，但按 `generatedAt + 12 小时`计算租约），并在配置了 `XBOARD_NODE_ID` 时校验快照 `serverId`。成功后以 `expirationTtl=43200` 写入固定键 `xboard:snapshot`，不会在响应或日志中回显 Token、UUID 或完整快照。
 
-```bash
-npx wrangler pages secret put EDGETUNNEL_SYNC_TOKEN --project-name edgt1
-```
-
-不要把该 Secret 写入 `wrangler.toml` 或提交到 Git。
+生产 Secret 以 Cloudflare Pages 控制台为准；不要把它写入 `wrangler.toml` 或提交到 Git。
 
 Xboard 的自适应订阅拉取也支持使用同一个 Secret 做服务端鉴权：Xboard 向目标的 `/sub` 地址发起请求时，会同时发送标准的 `Authorization: Bearer <EDGETUNNEL_SYNC_TOKEN>` 和专用的 `X-EdgeTunnel-Sync-Token: <EDGETUNNEL_SYNC_TOKEN>` 请求头。Worker 接受其中任意一个匹配值；专用请求头用于兼容会保留、覆盖或移除 `Authorization` 的托管出站代理。Worker 同时保留原有带 `token` 查询参数的个人客户端订阅鉴权；因此不要把同步 Secret 拼进订阅 URL，也不要记录到日志。多目标部署时，每个目标的 Xboard 配置必须使用对应 Worker 的同步 Secret。
 
@@ -237,11 +239,7 @@ Edgetunnel 只读取 Cloudflare 边缘注入的 `CF-Connecting-IP`，不会信�
 
 连接保持期间即使没有新流量，也会按心跳间隔刷新在线状态，因此生产建议保持 `60` 秒，且不要超过运行时上限 `240` 秒。连接关闭时会停止本地心跳，并以 force flush 尝试发送尾批次；Xboard 会在最后一次心跳超过 300 秒后自动把设备判定为离线。`0` 会显式禁用周期心跳，仅适用于测试或临时排障，不建议生产使用。
 
-设置敏感令牌：
-
-```bash
-npx wrangler pages secret put XBOARD_SERVER_TOKEN --project-name edgt1
-```
+在 Cloudflare Pages 控制台的 **Settings → Variables and Secrets → Secrets** 中手动配置 `XBOARD_SERVER_TOKEN`。它必须与 Xboard 后台的服务端 Token 完全一致；不要写入 `wrangler.toml` 或提交到 Git。
 
 完整的 Xboard 联合部署、快照协议、队列超时和生产验证步骤见 Xboard 仓库的 `docs/edgetunnel-xboard-deployment.md`。
 
@@ -301,14 +299,16 @@ Build output directory: dist-pages
 Root directory: GitHub 仓库就是 edgetunnel 时留空或填写 /；仅当仓库是 monorepo 时填写 edgetunnel
 ```
 
-在 Pages 项目的 **Settings → Bindings** 中为 Production 和 Preview 分别确认：
+在 Pages 项目的 **Settings → Bindings** 中为 Production 和 Preview 分别手动配置：
 
 ```text
-Variable name: XBOARD_KV
+Binding name: XBOARD_KV
 KV namespace: 选择 Xboard 写入快照所使用的同一个 namespace
 ```
 
-在 **Settings → Variables and Secrets** 中为 Production 和 Preview 设置：
+不要在 `wrangler.toml` 中添加 `[[kv_namespaces]]` 来管理当前生产绑定。
+
+在 **Settings → Variables and Secrets** 中为 Production 和 Preview 手动设置：
 
 ```env
 # 生产鉴权防护。
@@ -341,8 +341,8 @@ node --check dist-pages/_worker.js
 建议严格按以下顺序上线：
 
 1. 创建 Cloudflare KV namespace；
-2. 在 Worker/Pages 中绑定为 `XBOARD_KV`；
-3. 配置 `XBOARD_KV_REQUIRED=true`；
+2. 在 Cloudflare Pages 控制台的 Production/Preview 中手动绑定为 `XBOARD_KV`；
+3. 在 Cloudflare Pages 控制台配置 `XBOARD_KV_REQUIRED=true`；
 4. 在 Xboard 中配置 Cloudflare namespace ID、账户 ID 和 API Token；
 5. 在 Xboard 执行 `php artisan edgetunnel:sync-whitelist --dry-run`；
 6. 确认 UUID 数量正确后执行真实同步；
@@ -354,7 +354,7 @@ node --check dist-pages/_worker.js
 
 ### Worker 提示缺少 `XBOARD_KV`
 
-确认 `wrangler.toml` 或 Cloudflare 控制台中存在 binding，且名称严格为 `XBOARD_KV`。namespace 的显示名称可以不同，但 binding 名称不能变化。
+在 Cloudflare Pages 控制台的 Production 和 Preview 环境中确认存在 `XBOARD_KV` binding。当前生产 Pages 不从 `wrangler.toml` 读取该 binding；namespace 的显示名称可以不同，但 binding 名称不能变化。
 
 ### 开启生产防护后所有用户都无法连接
 
@@ -366,12 +366,12 @@ Wrangler 入口是 `dist/worker.js`，部署前必须重新执行 `npm run build
 
 ### 本地测试成功但线上失败
 
-重点核对 Cloudflare 环境中的 Variables、Secrets、KV bindings 和 Worker 名称。`wrangler.toml` 的注释模板不会自动创建线上资源。
+重点核对 Cloudflare Pages 控制台中 Production/Preview 各自的 Variables、Secrets 和 KV bindings，以及构建输出目录。Pages 与 HF Space 的环境变量互不共享；`wrangler.toml` 不会自动创建或补回当前生产 `XBOARD_KV` binding。
 
 ## 12. 安全与发布要求
 
 - 不提交真实 UUID、管理员密码、Server Token、Cloudflare API Token 或 KV namespace ID。
-- 生产 Xboard 部署必须启用 `XBOARD_KV_REQUIRED=true`。
+- 生产 Xboard 部署必须在 Cloudflare Pages 控制台启用 `XBOARD_KV_REQUIRED=true`。
 - 紧急撤权应发布合法的空白名单快照，不要通过删除 KV binding 实现。
 - 发布前必须执行测试和 dry-run；dry-run 成功不等于已完成真实生产验证。
 - 本项目仅供合法、合规的网络与系统管理场景使用，使用者需自行承担部署和运营责任。

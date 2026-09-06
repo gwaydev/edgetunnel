@@ -3,9 +3,5 @@ pages_build_output_dir = "dist-pages"
 compatibility_date = "2025-11-04"
 
 # Pages production bindings are configured in the Cloudflare dashboard.
-# Keep the binding name stable; do not commit the namespace ID or secrets.
-# [[kv_namespaces]]
-# binding = "XBOARD_KV"
-# id = "REPLACE_WITH_KV_NAMESPACE_ID"
 
 # Git deployments must run npm run build:pages and publish dist-pages.
