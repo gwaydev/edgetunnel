@@ -6380,20 +6380,11 @@ async function 校验Xboard订阅鉴权(request, env) {
 	const 配置同步TOKEN = typeof env.EDGETUNNEL_SYNC_TOKEN === 'string' ? env.EDGETUNNEL_SYNC_TOKEN.trim() : '';
 	if (配置同步TOKEN === '') return false;
 
-	const 请求授权 = request.headers.get('Authorization') || '';
+	// Adaptive subscription fetches use one dedicated service credential.
+	// Bearer auth remains reserved for snapshot PUT and the request body never
+	// carries a reusable secret.
 	const 专用同步TOKEN = request.headers.get('X-EdgeTunnel-Sync-Token') || '';
-	if (请求授权 === `Bearer ${配置同步TOKEN}` || 专用同步TOKEN.trim() === 配置同步TOKEN) return true;
-
-	if (request.method !== 'POST' || !(request.headers.get('Content-Type') || '').toLowerCase().includes('application/json')) {
-		return false;
-	}
-
-	try {
-		const 请求体 = await request.clone().json();
-		return typeof 请求体?.sync_token === 'string' && 请求体.sync_token.trim() === 配置同步TOKEN;
-	} catch {
-		return false;
-	}
+	return 专用同步TOKEN.trim() === 配置同步TOKEN;
 }
 
 export {

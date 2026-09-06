@@ -134,10 +134,10 @@ test('强制 Xboard KV 模式无 ADMIN 时，服务端订阅可用且普通请�
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': 'Bearer sync-secret',
+        'X-EdgeTunnel-Sync-Token': 'sync-secret',
         'User-Agent': 'Xboard-EdgeTunnel-Subscription/1.0',
       },
-      body: JSON.stringify({ sync_token: 'sync-secret' }),
+      body: JSON.stringify({}),
     }), env, { waitUntil });
     assert.equal(accepted.status, 200);
     assert.equal(accepted.headers.get('X-EdgeTunnel-Subscription-Route'), 'v3');
@@ -178,12 +178,12 @@ test('配置同步令牌时，未授权的 Xboard JSON 订阅会明确拒绝', a
   assert.equal(是Xboard服务端JSON订阅请求(new Request('https://worker.example/sub'), env), false);
 });
 
-test('Xboard 自适应订阅支持 Bearer、专用请求头和 JSON 请求体', async () => {
+test('Xboard 自适应订阅只接受专用同步请求头', async () => {
   const env = { EDGETUNNEL_SYNC_TOKEN: 'sync-secret' };
 
   assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
     headers: { Authorization: 'Bearer sync-secret' },
-  }), env), true);
+  }), env), false);
   assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
     headers: { 'X-EdgeTunnel-Sync-Token': 'sync-secret' },
   }), env), true);
@@ -191,7 +191,7 @@ test('Xboard 自适应订阅支持 Bearer、专用请求头和 JSON 请求体', 
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sync_token: 'sync-secret' }),
-  }), env), true);
+  }), env), false);
   assert.equal(await 校验Xboard订阅鉴权(new Request('https://worker.example/sub', {
     method: 'POST',
     headers: { Authorization: 'Bearer stale', 'X-EdgeTunnel-Sync-Token': 'stale', 'Content-Type': 'application/json' },

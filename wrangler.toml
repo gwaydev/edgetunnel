@@ -1,24 +1,9 @@
-name = "v20251104"
-main = "dist/worker.js"
+name = "edgt1"
 pages_build_output_dir = "dist-pages"
 compatibility_date = "2025-11-04"
-keep_vars = true
 
-# Xboard 生产部署必须先绑定 XBOARD_KV，再启用此防护开关。
-# 个人单 UUID 部署应保持未设置，或显式设置为 false。
-# [vars]
-# XBOARD_KV_REQUIRED = "true"
-
-# Xboard 通过 PUT /__xboard/snapshot 发布快照时，还必须在 Pages 中配置 Secret EDGETUNNEL_SYNC_TOKEN。
-# Secret 不得写入此文件或提交到 Git。
-# Xboard 生产鉴权使用固定 binding 名称 XBOARD_KV。
-# 先创建或选择 KV namespace，再取消注释并替换下面的占位 ID。
-# 不要把真实 namespace ID、API Token 或账户信息提交到公开仓库。
+# Pages production bindings are configured in the Cloudflare dashboard.
+# Keep the binding name stable; do not commit the namespace ID or secrets.
 # [[kv_namespaces]]
 # binding = "XBOARD_KV"
 # id = "REPLACE_WITH_KV_NAMESPACE_ID"
-# 快照租约：12 小时有效；负缓存默认 30 秒。
-# XBOARD_LEASE_TTL_SECONDS = "43200"
-# XBOARD_NEGATIVE_CACHE_TTL_SECONDS = "30"
-# 已建立 Xboard 连接的授权复核间隔，默认 30 秒；运行时限制 5～300 秒。
-# XBOARD_ACCESS_REVALIDATION_INTERVAL_SECONDS = "30"
